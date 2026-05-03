@@ -1,0 +1,79 @@
+<div class="story-images-settings">
+    <h4>📷 图片功能辅助 v1.0</h4>
+
+    <div style="margin: 8px 0; padding: 8px; background: rgba(74,158,255,0.1); border-radius: 4px; font-size: 12px;">
+        <strong>可用指令：</strong><br>
+        <code>/init-story [场景描述]</code> - 初始化故事画像<br>
+        <code>/gen-portrait [角色名] [描述]</code> - 生成人物画像<br>
+        <code>/gen-scene &lt;描述&gt;</code> - 生成场景画像<br>
+        <code>/gen-interact &lt;描述&gt;</code> - 生成交互图片<br>
+        <code>/gen-animate &lt;描述&gt;</code> - 生成动图<br>
+        <code>/test-comfy</code> - 测试ComfyUI连接
+    </div>
+
+    <h4>⚙️ 基本设置</h4>
+    <label>
+        <input type="checkbox" id="story_images_enabled">
+        启用自动图片生成
+    </label>
+    <label>
+        <input type="checkbox" id="story_images_auto_static">
+        自动处理 [图片：描述] 标签
+    </label>
+    <label>
+        <input type="checkbox" id="story_images_auto_animated">
+        自动处理 [动图：描述] 标签
+    </label>
+    <label>
+        <input type="checkbox" id="story_images_auto_photo">
+        自动处理 [📸图库新增：描述] 标签
+    </label>
+    <label>
+        <input type="checkbox" id="story_images_auto_wechat">
+        自动处理 [微信图片：描述] 标签
+    </label>
+    <label>
+        <input type="checkbox" id="story_images_remove_tag">
+        生成后移除原文标签
+    </label>
+    <label>
+        <input type="checkbox" id="story_images_show_toasts">
+        显示生成状态提示
+    </label>
+
+    <h4>🔌 ComfyUI 连接</h4>
+    <label style="display:block; margin: 4px 0;">
+        ComfyUI URL:
+        <input type="text" id="story_images_comfy_url" style="width: 100%; margin-top: 2px;">
+    </label>
+    <button id="story_images_test_connection" class="menu_button" style="margin: 4px 0;">
+        测试连接
+    </button>
+
+    <h4>🎨 生成参数</h4>
+    <label style="display:block; margin: 4px 0;">
+        模型:
+        <input type="text" id="story_images_model" style="width: 100%; margin-top: 2px;">
+    </label>
+    <label style="display:block; margin: 4px 0;">
+        提示词前缀:
+        <textarea id="story_images_prompt_prefix" style="width: 100%;"></textarea>
+    </label>
+    <label style="display:block; margin: 4px 0;">
+        负面提示词:
+        <textarea id="story_images_negative_prompt" style="width: 100%;"></textarea>
+    </label>
+    <div style="display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0;">
+        <label>步数: <input type="number" id="story_images_steps" min="1" max="150" style="width: 60px;"></label>
+        <label>CFG: <input type="number" id="story_images_scale" min="1" max="30" step="0.5" style="width: 60px;"></label>
+        <label>采样器: <input type="text" id="story_images_sampler" style="width: 120px;"></label>
+        <label>调度器: <input type="text" id="story_images_scheduler" style="width: 80px;"></label>
+    </div>
+
+    <h4>📐 分辨率设置</h4>
+    <div style="display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0;">
+        <label>人物: <input type="number" id="story_images_portrait_w" style="width: 60px;"> x <input type="number" id="story_images_portrait_h" style="width: 60px;"></label>
+        <label>场景: <input type="number" id="story_images_scene_w" style="width: 60px;"> x <input type="number" id="story_images_scene_h" style="width: 60px;"></label>
+        <label>交互: <input type="number" id="story_images_interact_w" style="width: 60px;"> x <input type="number" id="story_images_interact_h" style="width: 60px;"></label>
+    </div>
+</div>

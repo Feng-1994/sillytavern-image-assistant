@@ -1,0 +1,14 @@
+{
+    "display_name": "图片功能辅助",
+    "loading_order": 15,
+    "requires": [],
+    "optional": [
+        "sd"
+    ],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "Feng-1994",
+    "version": "1.0.0",
+    "homePage": "https://github.com/Feng-1994/sillytavern-image-assistant",
+    "auto_update": true
+}

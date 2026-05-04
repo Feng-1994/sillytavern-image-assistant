@@ -21,7 +21,7 @@ SillyTavern 扩展插件 - 为角色扮演提供智能图片生成辅助功能�
 3. 点击"安装第三方扩展"
 4. 输入仓库地址:
    ```
-   https://github.com/StoryBuilder2024/sillytavern-image-assistant
+   [https://github.com/StoryBuilder2024/sillytavern-image-assistant](https://github.com/Feng-1994/sillytavern-image-assistant)
    ```
 5. 点击安装，等待完成
 6. 刷新页面即可使用

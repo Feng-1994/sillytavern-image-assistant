@@ -44,7 +44,29 @@ async function ensureJSZip() {
     return JSZip;
 }
 
-const EXT_NAME = 'story-images';
+const EXT_NAME = 'sillytavern-image-assistant';
+
+function escapeHtml(str) {
+    if (typeof str !== 'string') return '';
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+async function withSdSettings(overrides, fn) {
+    const sd = extension_settings.sd;
+    if (!sd) return fn();
+    const saved = {};
+    for (const key of Object.keys(overrides)) {
+        saved[key] = sd[key];
+        sd[key] = overrides[key];
+    }
+    try {
+        return await fn();
+    } finally {
+        for (const key of Object.keys(saved)) {
+            sd[key] = saved[key];
+        }
+    }
+}
 
 const TAG_REGEXES = [
     { regex: /\[图片[：:]\s*([^\]]+)\]/g, type: 'static', label: '图片' },
@@ -77,6 +99,30 @@ const MODEL_PROFILES = {
         sizeOptions: ['1024x1024', '1216x832', '832x1216'],
         recommendedWorkflow: 'Default_Comfy_Workflow.json',
         baseNegative: 'nsfw, painting, cartoon, anime, illustration, 3d, lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry',
+    },
+    flux_dev: {
+        id: 'flux_dev',
+        name: 'Flux Dev',
+        pattern: /flux.?dev/i,
+        type: 'flux',
+        strengths: ['realistic', 'photorealistic', 'anime', 'cinematic', 'fantasy'],
+        description: 'Flux模型，高质量通用生成，需要专用工作流',
+        defaultSize: '1024x1024',
+        sizeOptions: ['1024x1024', '1216x832', '832x1216'],
+        recommendedWorkflow: 'Default_Comfy_Workflow.json',
+        baseNegative: 'nsfw, lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry',
+    },
+    sd15: {
+        id: 'sd15',
+        name: 'Stable Diffusion 1.5',
+        pattern: /stable.?diffusion.?v?1\.?5|sd.?v?1\.?5|sd1\.5/i,
+        type: 'sd15',
+        strengths: ['anime', 'illustration', 'manga'],
+        description: 'SD 1.5经典模型，生态丰富，资源占用低',
+        defaultSize: '512x768',
+        sizeOptions: ['512x768', '512x512', '768x512'],
+        recommendedWorkflow: 'Default_Comfy_Workflow.json',
+        baseNegative: 'nsfw, lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry',
     },
 };
 
@@ -184,11 +230,16 @@ const DEFAULT_SETTINGS = {
     modelCheckEnabled: true,
     cnbEnabled: false,
     cnbProjectUrl: '',
+    cnbApiToken: '',
+    cnbRepoPath: '',
+    cnbBranch: 'main',
     cnbAutoWake: true,
     cnbWakeTimeout: 120,
     cnbPollInterval: 5,
     cnbKeepAlive: false,
     cnbKeepAliveInterval: 300,
+    cnbAutoStop: false,
+    cnbAutoStopDelay: 30,
     showTopNavIcon: false,
 };
 
@@ -219,6 +270,41 @@ ANIMAGINE XL 3.1 SPECIFIC:
 
 EXAMPLE OUTPUT:
 1girl, sitting_on_bed, unbuttoned_white_shirt, blush, shy_expression, close-up, from_above, bedroom, warm_lighting, messy_hair, looking_at_viewer, soft_smile, night, lamp_light, rumpled_sheets`;
+
+const REALISTIC_SYSTEM_PROMPT = `You are an expert Stable Diffusion prompt engineer specializing in photorealistic image generation using SDXL models like Juggernaut XL. Your task is to convert a Chinese scene description into optimized English tags for realistic photography.
+
+CRITICAL RULES:
+- Output ONLY comma-separated tags. NO explanations, NO categories, NO labels, NO colons, NO markdown, NO line breaks
+- Start with subject count: "1girl" or "1boy" or "1other" etc.
+- Every tag must use underscores for spaces: "red_silk_dress" not "red silk dress"
+- No Chinese characters in output
+- No nsfw tags in output
+- Do NOT include quality tags (masterpiece, best quality, etc.) - they are added automatically
+- Do NOT repeat tags from the character reference - only add NEW scene-specific tags
+
+REQUIRED TAG CATEGORIES (you must include at least one tag from EACH):
+1. ACTION/POSE: What is the character doing? (sitting, standing, walking, leaning_forward, etc.)
+2. CLOTHING DETAILS: Specific clothing for THIS scene (unbuttoned_shirt, dress, suit, etc.)
+3. EXPRESSION: Facial expression (smile, serious, surprised, etc.)
+4. CAMERA: Shot type and angle (close-up, upper_body, full_body, from_above, from_below, etc.)
+5. SETTING: Where does this take place? (bedroom, kitchen, office, street, etc.)
+6. LIGHTING: Light quality and direction (warm_lighting, moonlight, natural_light, studio_lighting, etc.)
+
+REALISTIC STYLE SPECIFIC:
+- Use "photorealistic", "raw_photo", "8k" for realistic look
+- Use "film_grain", "depth_of_field", "bokeh" for photographic quality
+- Avoid anime/manga style tags
+- Focus on natural lighting and realistic textures
+
+EXAMPLE OUTPUT:
+1girl, sitting_on_sofa, white_shirt, gentle_smile, upper_body, from_front, living_room, warm_natural_light, soft_focus, bookshelf_background, afternoon_sunlight`;
+
+function getExpansionSystemPrompt() {
+    const settings = getSettings();
+    const style = settings.style || 'anime';
+    const realisticStyles = ['realistic', 'cinematic', 'portrait'];
+    return realisticStyles.includes(style) ? REALISTIC_SYSTEM_PROMPT : EXPANSION_SYSTEM_PROMPT;
+}
 
 const EXPANSION_USER_TEMPLATE = `Convert this Chinese scene description into detailed SD tags. The character reference tags are provided as BASE appearance - you must ADD scene-specific tags for action, clothing state, expression, camera angle, setting, and lighting that match THIS specific scene.
 
@@ -262,10 +348,43 @@ const cnbServiceState = {
     keepAliveTimer: null,
     pollTimer: null,
     consecutiveFailures: 0,
+    workspaceSn: null,
+    pipelineId: null,
+    autoStopTimer: null,
+    lastActivity: null,
 };
 
 async function cnbCheckComfyStatus(comfyUrl) {
     const url = (comfyUrl || extension_settings.sd?.comfy_url || 'http://127.0.0.1:8188').replace(/\/+$/, '');
+
+    if (url.startsWith('http://127.0.0.1:') || url.startsWith('http://localhost:')) {
+        try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000);
+            const response = await fetch(`${url}/system_stats`, {
+                method: 'GET',
+                signal: controller.signal,
+            });
+            clearTimeout(timeoutId);
+            if (response.ok) {
+                const data = await response.json();
+                return { online: true, data: data };
+            }
+            return { online: false, data: null, error: `HTTP ${response.status}` };
+        } catch (e) {
+            return { online: false, data: null, error: e.message };
+        }
+    }
+
+    if (url.startsWith('https://cnb.cool/')) {
+        try {
+            const result = await cnbApiCall('/comfyui-proxy/system_stats', { timeout: 15000 });
+            return { online: true, data: result };
+        } catch (e) {
+            return { online: false, data: null, error: `CNB代理访问失败: ${e.message}` };
+        }
+    }
+
     try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 8000);
@@ -284,10 +403,55 @@ async function cnbCheckComfyStatus(comfyUrl) {
     }
 }
 
+async function cnbCheckWorkspaceStatus() {
+    const settings = getSettings();
+    if (!settings.cnbApiToken || !settings.cnbRepoPath) {
+        return { running: false, comfyProxyUrl: null, localTunnelUrl: null };
+    }
+
+    try {
+        const result = await cnbApiCall(`/workspace-status?repo=${encodeURIComponent(settings.cnbRepoPath)}`);
+        if (result.status === 'running' && result.workspace) {
+            cnbServiceState.workspaceSn = result.workspace.sn;
+            cnbServiceState.pipelineId = result.workspace.pipelineId;
+            return { running: true, comfyProxyUrl: result.comfyProxyUrl, localTunnelUrl: result.localTunnelUrl, workspace: result.workspace, detail: result.detail };
+        }
+        return { running: false, comfyProxyUrl: null, localTunnelUrl: null };
+    } catch (e) {
+        console.warn('[Story-Images CNB] Check workspace status failed:', e.message);
+        return { running: false, comfyProxyUrl: null, localTunnelUrl: null, error: e.message };
+    }
+}
+
+async function cnbApiCall(endpoint, options = {}) {
+    try {
+        const controller = new AbortController();
+        const timeoutMs = options.timeout || 15000;
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+        const response = await fetch(`/api/cnb${endpoint}`, {
+            method: options.method || 'GET',
+            headers: getRequestHeaders(),
+            body: options.body ? JSON.stringify(options.body) : undefined,
+            signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || data.message || `API错误 (${response.status})`);
+        }
+        return data;
+    } catch (e) {
+        console.error(`[Story-Images CNB] API call failed: ${endpoint}`, e);
+        throw e;
+    }
+}
+
 async function cnbWakeService() {
     const settings = getSettings();
-    if (!settings.cnbEnabled || !settings.cnbProjectUrl) {
-        console.warn('[Story-Images CNB] CNB not configured');
+    if (!settings.cnbEnabled) {
+        console.warn('[Story-Images CNB] CNB not enabled');
         return false;
     }
 
@@ -300,30 +464,82 @@ async function cnbWakeService() {
     cnbServiceState.status = 'waking';
 
     cnbServiceState.wakePromise = (async () => {
-        const projectUrl = settings.cnbProjectUrl.replace(/\/+$/, '');
         const comfyUrl = (extension_settings.sd?.comfy_url || 'http://127.0.0.1:8188').replace(/\/+$/, '');
         const timeout = (settings.cnbWakeTimeout || 120) * 1000;
         const pollInterval = (settings.cnbPollInterval || 5) * 1000;
 
-        console.log(`[Story-Images CNB] Waking service: ${projectUrl}`);
-        showToast('🔄 正在唤醒CNB ComfyUI服务...', 'info');
-        cnbUpdateStatusUI('waking', '正在唤醒服务...');
+        console.log('[Story-Images CNB] Starting workspace via API...');
+        cnbUpdateStatusUI('waking', '正在初始化...', {
+            progress: 5,
+            stageLabel: '初始化',
+            detail: { buildStage: '准备中' },
+        });
 
         try {
-            const wakeController = new AbortController();
-            const wakeTimeoutId = setTimeout(() => wakeController.abort(), 15000);
-            try {
-                await fetch(projectUrl, {
-                    method: 'GET',
-                    mode: 'no-cors',
-                    signal: wakeController.signal,
+            if (settings.cnbApiToken && settings.cnbRepoPath) {
+                cnbUpdateStatusUI('waking', '正在发送启动请求...', {
+                    progress: 15,
+                    stageLabel: '发送启动请求',
+                    detail: { branch: settings.cnbBranch || 'main' },
                 });
-            } catch (e) {
-                console.log('[Story-Images CNB] Wake request sent (no-cors expected)');
+
+                const result = await cnbApiCall('/start', {
+                    method: 'POST',
+                    body: {
+                        repo: settings.cnbRepoPath,
+                        branch: settings.cnbBranch || 'main',
+                    },
+                });
+
+                if (result.sn) {
+                    cnbServiceState.workspaceSn = result.sn;
+                }
+                if (result.pipelineId) {
+                    cnbServiceState.pipelineId = result.pipelineId;
+                }
+
+                console.log(`[Story-Images CNB] Workspace start requested: sn=${result.sn || 'N/A'}`);
+                cnbUpdateStatusUI('waking', '启动请求已发送，等待环境准备...', {
+                    progress: 25,
+                    stageLabel: '环境准备中',
+                    detail: {
+                        workspaceSn: result.sn || '',
+                        buildStage: 'prepare',
+                    },
+                });
+            } else if (settings.cnbProjectUrl) {
+                const projectUrl = settings.cnbProjectUrl.replace(/\/+$/, '');
+                const wakeController = new AbortController();
+                const wakeTimeoutId = setTimeout(() => wakeController.abort(), 15000);
+                try {
+                    await fetch(projectUrl, {
+                        method: 'GET',
+                        mode: 'no-cors',
+                        signal: wakeController.signal,
+                    });
+                } catch (e) {
+                    console.log('[Story-Images CNB] Legacy wake request sent (no-cors expected)');
+                }
+                clearTimeout(wakeTimeoutId);
+                cnbUpdateStatusUI('waking', '唤醒请求已发送（传统模式）...', {
+                    progress: 30,
+                    stageLabel: '唤醒中（传统模式）',
+                });
+            } else {
+                throw new Error('请配置CNB API Token和仓库路径，或CNB项目URL');
             }
-            clearTimeout(wakeTimeoutId);
         } catch (e) {
-            console.warn('[Story-Images CNB] Wake request error:', e.message);
+            console.warn('[Story-Images CNB] Start request error:', e.message);
+            showToast(`⚠️ CNB启动请求失败: ${e.message}`, 'error');
+            cnbServiceState.status = 'offline';
+            cnbServiceState.isWaking = false;
+            cnbServiceState.wakePromise = null;
+            cnbUpdateStatusUI('offline', `启动失败: ${e.message}`, {
+                progress: 0,
+                stageLabel: '启动失败',
+                detail: { error: e.message },
+            });
+            return false;
         }
 
         const startTime = Date.now();
@@ -331,25 +547,115 @@ async function cnbWakeService() {
             await new Promise(r => setTimeout(r, pollInterval));
 
             const elapsed = Math.round((Date.now() - startTime) / 1000);
-            cnbUpdateStatusUI('waking', `等待服务启动... (${elapsed}秒)`);
+            const timeRatio = Math.min(0.85, (Date.now() - startTime) / timeout);
+            let progress = 25 + Math.round(timeRatio * 60);
+            let stageLabel = '环境准备中';
+            let buildStage = 'prepare';
 
-            const status = await cnbCheckComfyStatus(comfyUrl);
-            if (status.online) {
-                cnbServiceState.status = 'online';
-                cnbServiceState.lastWake = new Date().toISOString();
-                cnbServiceState.consecutiveFailures = 0;
-                cnbServiceState.isWaking = false;
-                cnbServiceState.wakePromise = null;
+            if (settings.cnbApiToken && settings.cnbRepoPath && cnbServiceState.workspaceSn) {
+                try {
+                    const buildResult = await cnbApiCall(`/build-status/${encodeURIComponent(settings.cnbRepoPath)}/${cnbServiceState.workspaceSn}`);
+                    const pipeline = buildResult?.pipelinesStatus?.[Object.keys(buildResult?.pipelinesStatus || {})[0]];
+                    if (pipeline) {
+                        const pStatus = pipeline.status?.toLowerCase();
+                        if (pStatus === 'prepare') {
+                            const prepareStage = pipeline.stages?.find(s => s.name === 'prepare');
+                            if (prepareStage?.status === 'start') {
+                                progress = 30 + Math.round(timeRatio * 30);
+                                stageLabel = '环境准备中';
+                                buildStage = 'prepare';
+                            } else if (prepareStage?.status === 'success') {
+                                progress = 65;
+                                stageLabel = '构建工作空间';
+                                buildStage = 'building';
+                            }
+                        } else if (pStatus === 'running' || pStatus === 'success') {
+                            progress = 75;
+                            stageLabel = '服务启动中';
+                            buildStage = 'starting';
+                        }
+                    }
+                } catch (_) { }
+            }
 
-                console.log('[Story-Images CNB] Service is online!');
-                showToast('✅ CNB ComfyUI服务已唤醒!', 'success');
-                cnbUpdateStatusUI('online', '服务在线');
+            cnbUpdateStatusUI('waking', `等待服务就绪... (${elapsed}秒)`, {
+                progress,
+                stageLabel,
+                detail: {
+                    workspaceSn: cnbServiceState.workspaceSn || '',
+                    buildStage,
+                    elapsed,
+                },
+            });
 
-                if (settings.cnbKeepAlive) {
-                    cnbStartKeepAlive();
+            if (settings.cnbApiToken && settings.cnbRepoPath) {
+                const wsStatus = await cnbCheckWorkspaceStatus();
+                if (wsStatus.running) {
+                    cnbServiceState.status = 'online';
+                    cnbServiceState.lastWake = new Date().toISOString();
+                    cnbServiceState.consecutiveFailures = 0;
+                    cnbServiceState.isWaking = false;
+                    cnbServiceState.wakePromise = null;
+                    cnbServiceState.lastActivity = new Date().toISOString();
+
+                    cnbUpdateStatusUI('waking', '正在同步ComfyUI配置...', {
+                        progress: 95,
+                        stageLabel: '同步配置',
+                        detail: {
+                            workspaceSn: cnbServiceState.workspaceSn || '',
+                            branch: wsStatus.workspace?.branch || '',
+                        },
+                    });
+
+                    await cnbSyncComfyUrl(settings);
+
+                    const comfyUrlNow = extension_settings.sd?.comfy_url || '';
+                    console.log('[Story-Images CNB] Workspace is running!');
+                    showToast('✅ CNB Workspace已启动! ComfyUI URL已同步', 'success');
+                    cnbUpdateStatusUI('online', '服务在线', {
+                        progress: 100,
+                        stageLabel: '启动完成',
+                        detail: {
+                            workspaceSn: cnbServiceState.workspaceSn || '',
+                            branch: wsStatus.workspace?.branch || '',
+                            duration: wsStatus.workspace?.duration || 0,
+                            comfyUrl: comfyUrlNow,
+                        },
+                    });
+
+                    if (settings.cnbKeepAlive) {
+                        cnbStartKeepAlive();
+                    }
+                    cnbResetAutoStopTimer();
+
+                    return true;
                 }
+            } else {
+                const status = await cnbCheckComfyStatus(comfyUrl);
+                if (status.online) {
+                    cnbServiceState.status = 'online';
+                    cnbServiceState.lastWake = new Date().toISOString();
+                    cnbServiceState.consecutiveFailures = 0;
+                    cnbServiceState.isWaking = false;
+                    cnbServiceState.wakePromise = null;
+                    cnbServiceState.lastActivity = new Date().toISOString();
 
-                return true;
+                    console.log('[Story-Images CNB] Service is online!');
+                    showToast('✅ CNB ComfyUI服务已就绪!', 'success');
+                    cnbUpdateStatusUI('online', '服务在线', {
+                        progress: 100,
+                        stageLabel: '启动完成',
+                    });
+
+                    await cnbSyncComfyUrl(settings);
+
+                    if (settings.cnbKeepAlive) {
+                        cnbStartKeepAlive();
+                    }
+                    cnbResetAutoStopTimer();
+
+                    return true;
+                }
             }
         }
 
@@ -358,8 +664,12 @@ async function cnbWakeService() {
         cnbServiceState.wakePromise = null;
 
         console.error('[Story-Images CNB] Wake timeout');
-        showToast('❌ CNB ComfyUI唤醒超时，请检查服务状态', 'error');
-        cnbUpdateStatusUI('offline', '唤醒超时');
+        showToast('❌ CNB ComfyUI启动超时，请检查服务状态', 'error');
+        cnbUpdateStatusUI('offline', '启动超时', {
+            progress: 0,
+            stageLabel: '超时',
+            detail: { error: `等待超过${Math.round(timeout/1000)}秒，服务未就绪` },
+        });
 
         return false;
     })();
@@ -367,27 +677,724 @@ async function cnbWakeService() {
     return cnbServiceState.wakePromise;
 }
 
+async function cnbStopService() {
+    const settings = getSettings();
+    if (!settings.cnbApiToken || !settings.cnbRepoPath) {
+        showToast('⚠️ 请先配置CNB API Token和仓库路径', 'error');
+        return false;
+    }
+
+    try {
+        cnbUpdateStatusUI('waking', '正在停止服务...', {
+            progress: 50,
+            stageLabel: '停止中',
+            detail: { workspaceSn: cnbServiceState.workspaceSn || '' },
+        });
+        showToast('🔄 正在停止CNB ComfyUI服务...', 'info');
+
+        const body = {};
+        if (cnbServiceState.pipelineId) {
+            body.pipelineId = cnbServiceState.pipelineId;
+        } else if (cnbServiceState.workspaceSn) {
+            body.sn = cnbServiceState.workspaceSn;
+        } else {
+            const listResult = await cnbApiCall(`/list?slug=${encodeURIComponent(settings.cnbRepoPath)}&page=1&page_size=5`);
+            const workspaces = Array.isArray(listResult) ? listResult : (listResult?.list || []);
+            const activeWs = workspaces.find(w => w.status?.toLowerCase() === 'running' || w.status?.toLowerCase() === 'preparing');
+            if (activeWs) {
+                body.pipelineId = activeWs.pipelineId || String(activeWs.id || '');
+                body.sn = activeWs.sn || '';
+            } else {
+                showToast('⚠️ 未找到运行中的Workspace', 'error');
+                cnbUpdateStatusUI('offline', '未找到运行中的服务', {
+                    detail: { error: '没有运行中的工作空间' },
+                });
+                return false;
+            }
+        }
+
+        await cnbApiCall('/stop', { method: 'POST', body });
+
+        cnbStopKeepAlive();
+        cnbClearAutoStopTimer();
+        cnbServiceState.status = 'offline';
+        cnbServiceState.isWaking = false;
+        cnbServiceState.wakePromise = null;
+
+        console.log('[Story-Images CNB] Service stopped');
+        showToast('✅ CNB ComfyUI服务已停止', 'success');
+        cnbUpdateStatusUI('offline', '服务已停止', {
+            detail: { workspaceSn: cnbServiceState.workspaceSn || '' },
+        });
+
+        return true;
+    } catch (e) {
+        console.error('[Story-Images CNB] Stop error:', e);
+        showToast(`❌ 停止服务失败: ${e.message}`, 'error');
+        cnbUpdateStatusUI('offline', '停止失败', {
+            detail: { error: e.message },
+        });
+        return false;
+    }
+}
+
+async function cnbQueryWorkspaceStatus() {
+    const settings = getSettings();
+    if (!settings.cnbApiToken || !settings.cnbRepoPath) {
+        return null;
+    }
+
+    try {
+        const result = await cnbApiCall(`/workspace-status?repo=${encodeURIComponent(settings.cnbRepoPath)}`);
+        if (result.status === 'running' && result.workspace) {
+            cnbServiceState.workspaceSn = result.workspace.sn || cnbServiceState.workspaceSn;
+            cnbServiceState.pipelineId = result.workspace.pipelineId || cnbServiceState.pipelineId;
+            return result.workspace;
+        }
+        return null;
+    } catch (e) {
+        console.warn('[Story-Images CNB] Query workspace status failed:', e.message);
+        return null;
+    }
+}
+
+function cnbResetAutoStopTimer() {
+    const settings = getSettings();
+    cnbClearAutoStopTimer();
+
+    if (!settings.cnbAutoStop || !settings.cnbEnabled) return;
+
+    const delayMinutes = settings.cnbAutoStopDelay || 30;
+    cnbServiceState.autoStopTimer = setTimeout(async () => {
+        console.log(`[Story-Images CNB] Auto-stop triggered after ${delayMinutes} minutes of inactivity`);
+        showToast(`⏱️ CNB服务已空闲${delayMinutes}分钟，自动停止中...`, 'info');
+        await cnbStopService();
+    }, delayMinutes * 60 * 1000);
+
+    cnbServiceState.lastActivity = new Date().toISOString();
+}
+
+function cnbClearAutoStopTimer() {
+    if (cnbServiceState.autoStopTimer) {
+        clearTimeout(cnbServiceState.autoStopTimer);
+        cnbServiceState.autoStopTimer = null;
+    }
+}
+
+async function cnbTestApiToken() {
+    const settings = getSettings();
+    if (!settings.cnbApiToken) {
+        showToast('⚠️ 请先填写CNB API Token', 'error');
+        return;
+    }
+
+    try {
+        const result = await cnbApiCall('/test-token');
+        if (result.valid) {
+            showToast('✅ CNB API Token验证成功!', 'success');
+            await cnbFetchRepos();
+        } else {
+            showToast(`❌ Token验证失败: ${result.message}`, 'error');
+        }
+    } catch (e) {
+        showToast(`❌ Token验证失败: ${e.message}`, 'error');
+    }
+}
+
+async function cnbFetchRepos() {
+    const settings = getSettings();
+    if (!settings.cnbApiToken) return;
+
+    try {
+        const result = await cnbApiCall('/repos?page=1&page_size=50');
+        const repos = result.repos || [];
+        const selectEl = document.getElementById('si_cnb_repo_select');
+        if (!selectEl) return;
+
+        selectEl.innerHTML = '<option value="">-- 请选择仓库 --</option>';
+        for (const repo of repos) {
+            const option = document.createElement('option');
+            option.value = repo.path;
+            option.textContent = `${repo.path}${repo.description ? '  (' + repo.description.substring(0, 25) + '...)' : ''}`;
+            option.dataset.defaultBranch = repo.defaultBranch;
+            if (repo.path === settings.cnbRepoPath) option.selected = true;
+            selectEl.appendChild(option);
+        }
+
+        const customOption = document.createElement('option');
+        customOption.value = '__custom__';
+        customOption.textContent = '✏️ 手动输入...';
+        selectEl.appendChild(customOption);
+
+        selectEl.style.display = 'block';
+        const textInput = document.getElementById('si_cnb_repo_path');
+        if (textInput && settings.cnbRepoPath && !repos.some(r => r.path === settings.cnbRepoPath)) {
+            textInput.style.display = 'block';
+            selectEl.value = '__custom__';
+        } else if (textInput) {
+            textInput.style.display = settings.cnbRepoPath && !repos.some(r => r.path === settings.cnbRepoPath) ? 'block' : 'none';
+        }
+
+        showToast(`✅ 已加载 ${repos.length} 个仓库`, 'success');
+
+        if (settings.cnbRepoPath) {
+            await cnbFetchBranches(settings.cnbRepoPath);
+        }
+    } catch (e) {
+        console.error('[Story-Images CNB] Fetch repos failed:', e);
+        showToast(`⚠️ 获取仓库列表失败: ${e.message}`, 'error');
+    }
+}
+
+async function cnbFetchBranches(repoPath) {
+    if (!repoPath || repoPath === '__custom__') return;
+
+    const settings = getSettings();
+    if (!settings.cnbApiToken) return;
+
+    try {
+        const result = await cnbApiCall(`/branches?repo=${encodeURIComponent(repoPath)}&page=1&page_size=50`);
+        const branches = result.branches || [];
+        const selectEl = document.getElementById('si_cnb_branch_select');
+        if (!selectEl) return;
+
+        selectEl.innerHTML = '<option value="">-- 请选择分支 --</option>';
+        for (const branch of branches) {
+            const option = document.createElement('option');
+            option.value = branch.name;
+            option.textContent = `${branch.name}${branch.isDefault ? ' (默认)' : ''}`;
+            if (branch.name === settings.cnbBranch || (branch.isDefault && !settings.cnbBranch)) {
+                option.selected = true;
+            }
+            selectEl.appendChild(option);
+        }
+
+        const customOption = document.createElement('option');
+        customOption.value = '__custom__';
+        customOption.textContent = '✏️ 手动输入...';
+        selectEl.appendChild(customOption);
+
+        selectEl.style.display = 'block';
+        const textInput = document.getElementById('si_cnb_branch');
+        if (textInput) textInput.style.display = 'none';
+
+        if (branches.length > 0 && !settings.cnbBranch) {
+            const defaultBranch = branches.find(b => b.isDefault);
+            if (defaultBranch) {
+                settings.cnbBranch = defaultBranch.name;
+                saveSettingsDebounced();
+            }
+        }
+    } catch (e) {
+        console.error('[Story-Images CNB] Fetch branches failed:', e);
+        showToast(`⚠️ 获取分支列表失败: ${e.message}`, 'error');
+    }
+}
+
+async function cnbSyncComfyUrl(settings) {
+    if (!settings.cnbApiToken || !settings.cnbRepoPath) return;
+
+    try {
+        const wsStatus = await cnbCheckWorkspaceStatus();
+        if (!wsStatus.running || !wsStatus.workspace) {
+            console.log('[Story-Images CNB] No active workspace found for URL sync');
+            return;
+        }
+
+        let comfyUrl = null;
+
+        if (wsStatus.localTunnelUrl) {
+            comfyUrl = wsStatus.localTunnelUrl;
+            console.log('[Story-Images CNB] Using existing SSH tunnel URL:', comfyUrl);
+        }
+
+        if (!comfyUrl && settings.cnbApiToken && settings.cnbRepoPath) {
+            cnbUpdateStatusUI('waking', '正在建立SSH隧道...', {
+                progress: 92,
+                stageLabel: '建立SSH隧道',
+                detail: { workspaceSn: wsStatus.workspace.sn || '' },
+            });
+
+            try {
+                const tunnelResult = await cnbApiCall('/setup-tunnel', { method: 'POST', timeout: 20000 });
+                if (tunnelResult.localTunnelUrl) {
+                    comfyUrl = tunnelResult.localTunnelUrl;
+                    console.log('[Story-Images CNB] SSH tunnel established, local URL:', comfyUrl);
+                }
+            } catch (e) {
+                console.warn('[Story-Images CNB] SSH tunnel setup failed:', e.message);
+            }
+        }
+
+        if (!comfyUrl && wsStatus.comfyProxyUrl) {
+            comfyUrl = wsStatus.comfyProxyUrl;
+            console.log('[Story-Images CNB] Fallback to CNB web proxy URL (requires browser auth):', comfyUrl);
+        }
+
+        if (!comfyUrl) {
+            const pipelineId = wsStatus.workspace.pipelineId || cnbServiceState.pipelineId;
+            if (pipelineId) {
+                comfyUrl = `https://cnb.cool/${settings.cnbRepoPath}/-/workspace/proxy/${pipelineId}/8188`;
+            }
+        }
+
+        if (comfyUrl && typeof comfyUrl === 'string') {
+            comfyUrl = comfyUrl.replace(/\/+$/, '');
+
+            const sd = extension_settings.sd;
+            if (sd) {
+                const oldUrl = sd.comfy_url || '';
+                sd.comfy_url = comfyUrl;
+                saveSettingsDebounced();
+
+                const comfyUrlInput = document.getElementById('comfy_url');
+                if (comfyUrlInput) comfyUrlInput.value = comfyUrl;
+
+                console.log(`[Story-Images CNB] Auto-synced ComfyUI URL: ${oldUrl} → ${comfyUrl}`);
+                showToast(`🔗 ComfyUI URL已自动同步: ${comfyUrl}`, 'success');
+            }
+        } else {
+            console.log('[Story-Images CNB] Could not determine ComfyUI URL.');
+            showToast('⚠️ 无法确定ComfyUI URL，请检查SSH密钥配置', 'error');
+        }
+    } catch (e) {
+        console.warn('[Story-Images CNB] Sync ComfyUI URL failed:', e);
+    }
+}
+
+const CNB_SETUP_STEPS = ['validate', 'start', 'wait', 'tunnel', 'sync', 'test'];
+
+let cnbSetupState = {
+    running: false,
+    currentStep: null,
+    failedStep: null,
+    errorMessage: null,
+    logs: [],
+    retryFromStep: null,
+};
+
+function cnbSetupLog(level, message) {
+    const ts = new Date().toLocaleTimeString();
+    const prefix = { info: 'ℹ️', success: '✅', warn: '⚠️', error: '❌' }[level] || '•';
+    cnbSetupState.logs.push({ ts, level, message });
+    const logEl = document.getElementById('si_cnb_log');
+    if (logEl) {
+        const cls = `si-log-${level}`;
+        logEl.innerHTML += `<div class="${cls}">[${ts}] ${prefix} ${escapeHtml(message)}</div>`;
+        logEl.scrollTop = logEl.scrollHeight;
+    }
+    console.log(`[Story-Images CNB Setup] ${prefix} ${message}`);
+}
+
+function cnbSetupClearLog() {
+    cnbSetupState.logs = [];
+    const logEl = document.getElementById('si_cnb_log');
+    if (logEl) logEl.innerHTML = '';
+}
+
+function cnbSetupUpdateStep(stepName, status, subText) {
+    const stepEl = document.querySelector(`.si-setup-step[data-step="${stepName}"]`);
+    if (!stepEl) return;
+
+    stepEl.classList.remove('si-step-active', 'si-step-done', 'si-step-error', 'si-step-skipped');
+
+    if (status === 'active') {
+        stepEl.classList.add('si-step-active');
+        const iconEl = stepEl.querySelector('.si-step-icon');
+        if (iconEl) iconEl.textContent = '⏳';
+    } else if (status === 'done') {
+        stepEl.classList.add('si-step-done');
+        const iconEl = stepEl.querySelector('.si-step-icon');
+        if (iconEl) iconEl.textContent = '✓';
+    } else if (status === 'error') {
+        stepEl.classList.add('si-step-error');
+        const iconEl = stepEl.querySelector('.si-step-icon');
+        if (iconEl) iconEl.textContent = '✗';
+    } else if (status === 'skipped') {
+        stepEl.classList.add('si-step-skipped');
+        const iconEl = stepEl.querySelector('.si-step-icon');
+        if (iconEl) iconEl.textContent = '⏭';
+    }
+
+    if (subText) {
+        const subEl = stepEl.querySelector('.si-step-sub');
+        if (subEl) subEl.textContent = subText;
+    }
+}
+
+function cnbSetupResetSteps() {
+    const stepNames = CNB_SETUP_STEPS;
+    const stepNums = ['1', '2', '3', '4', '5', '6'];
+    for (let i = 0; i < stepNames.length; i++) {
+        const stepEl = document.querySelector(`.si-setup-step[data-step="${stepNames[i]}"]`);
+        if (!stepEl) continue;
+        stepEl.classList.remove('si-step-active', 'si-step-done', 'si-step-error', 'si-step-skipped');
+        const iconEl = stepEl.querySelector('.si-step-icon');
+        if (iconEl) iconEl.textContent = stepNums[i];
+    }
+}
+
+function cnbSetupShowRetry(show) {
+    const retryBtn = document.getElementById('si_cnb_retry');
+    if (retryBtn) {
+        retryBtn.classList.toggle('si-retry-visible', show);
+    }
+}
+
+async function cnbAutoSetup(retryFromStep) {
+    const settings = getSettings();
+
+    if (cnbSetupState.running) {
+        showToast('⚠️ 自动化流程正在执行中，请等待完成', 'warn');
+        return false;
+    }
+
+    if (!settings.cnbApiToken) {
+        showToast('⚠️ 请先填写CNB API Token', 'error');
+        return false;
+    }
+
+    if (!settings.cnbRepoPath && !settings.cnbProjectUrl) {
+        showToast('⚠️ 请先配置仓库路径或CNB项目URL', 'error');
+        return false;
+    }
+
+    cnbSetupState.running = true;
+    cnbSetupState.failedStep = null;
+    cnbSetupState.errorMessage = null;
+    cnbSetupShowRetry(false);
+
+    const stepsContainer = document.getElementById('si_cnb_steps');
+    if (stepsContainer) stepsContainer.style.display = 'block';
+
+    const startBtn = document.getElementById('si_cnb_start_service');
+    if (startBtn) startBtn.disabled = true;
+
+    if (!retryFromStep) {
+        cnbSetupResetSteps();
+        cnbSetupClearLog();
+        cnbSetupLog('info', '🚀 开始一键启动流程...');
+    } else {
+        cnbSetupLog('info', `🔄 从步骤 "${retryFromStep}" 重试...`);
+        const retryIdx = CNB_SETUP_STEPS.indexOf(retryFromStep);
+        for (let i = retryIdx; i < CNB_SETUP_STEPS.length; i++) {
+            const stepEl = document.querySelector(`.si-setup-step[data-step="${CNB_SETUP_STEPS[i]}]`);
+            if (stepEl) {
+                stepEl.classList.remove('si-step-done', 'si-step-error', 'si-step-skipped');
+                const iconEl = stepEl.querySelector('.si-step-icon');
+                if (iconEl) iconEl.textContent = String(i + 1);
+            }
+        }
+    }
+
+    const startFrom = retryFromStep ? CNB_SETUP_STEPS.indexOf(retryFromStep) : 0;
+
+    try {
+        // Step 1: Validate API Token and Repository
+        if (startFrom <= 0) {
+            cnbSetupUpdateStep('validate', 'active', '正在验证API Token...');
+            cnbSetupLog('info', '验证API Token...');
+            cnbUpdateStatusUI('waking', '验证API Token...', { progress: 5, stageLabel: '验证Token' });
+
+            const tokenResult = await cnbApiCall('/test-token');
+            if (!tokenResult.valid) {
+                throw { step: 'validate', message: `API Token验证失败: ${tokenResult.message || '无效Token'}`, hint: '请在 cnb.cool 个人设置中创建新的访问令牌，确保勾选workspace权限' };
+            }
+            cnbSetupLog('success', `Token验证成功 (用户: ${tokenResult.username || tokenResult.nickname || '未知'})`);
+
+            if (settings.cnbRepoPath) {
+                cnbSetupUpdateStep('validate', 'active', '正在验证仓库可访问性...');
+                cnbSetupLog('info', `验证仓库: ${settings.cnbRepoPath}`);
+                const repoResult = await cnbApiCall(`/validate-repo?repo=${encodeURIComponent(settings.cnbRepoPath)}`);
+                if (!repoResult.valid || !repoResult.exists) {
+                    throw { step: 'validate', message: `仓库不可访问: ${repoResult.error || '不存在或无权限'}`, hint: '请确认仓库路径格式正确(组织名/仓库名)且有访问权限' };
+                }
+                cnbSetupLog('success', `仓库验证成功: ${repoResult.name} (${repoResult.path})`);
+            }
+
+            cnbSetupUpdateStep('validate', 'done');
+        }
+
+        // Step 2: Start Workspace
+        if (startFrom <= 1) {
+            cnbSetupUpdateStep('start', 'active', '正在检查工作空间状态...');
+            cnbSetupLog('info', '检查现有工作空间...');
+            cnbUpdateStatusUI('waking', '启动云开发环境...', { progress: 15, stageLabel: '启动环境' });
+
+            let wsStatus = await cnbCheckWorkspaceStatus();
+            if (wsStatus.running) {
+                cnbSetupLog('success', `工作空间已在运行 (SN: ${wsStatus.workspace?.sn || 'N/A'})`);
+                cnbSetupUpdateStep('start', 'done', '工作空间已运行，跳过启动');
+                cnbSetupUpdateStep('wait', 'skipped', '环境已就绪，跳过等待');
+            } else {
+                cnbSetupUpdateStep('start', 'active', '正在发送启动请求...');
+                cnbSetupLog('info', '发送Workspace启动请求...');
+
+                const startResult = await cnbApiCall('/start', {
+                    method: 'POST',
+                    body: {
+                        repo: settings.cnbRepoPath,
+                        branch: settings.cnbBranch || 'main',
+                    },
+                });
+
+                if (startResult.sn) {
+                    cnbServiceState.workspaceSn = startResult.sn;
+                }
+                if (startResult.pipelineId) {
+                    cnbServiceState.pipelineId = startResult.pipelineId;
+                }
+
+                cnbSetupLog('success', `启动请求已发送 (SN: ${startResult.sn || 'N/A'})`);
+                cnbSetupUpdateStep('start', 'done');
+            }
+        }
+
+        // Step 3: Wait for Environment Ready
+        if (startFrom <= 2) {
+            const wsStatus2 = await cnbCheckWorkspaceStatus();
+            if (wsStatus2.running) {
+                cnbSetupUpdateStep('wait', 'done', '环境已就绪');
+            } else {
+                cnbSetupUpdateStep('wait', 'active', '等待环境构建和启动...');
+                cnbSetupLog('info', '等待Workspace构建和服务启动...');
+                cnbUpdateStatusUI('waking', '等待环境就绪...', { progress: 30, stageLabel: '等待就绪' });
+
+                const timeout = (settings.cnbWakeTimeout || 120) * 1000;
+                const pollInterval = (settings.cnbPollInterval || 5) * 1000;
+                const startTime = Date.now();
+                let workspaceReady = false;
+
+                while (Date.now() - startTime < timeout) {
+                    await new Promise(r => setTimeout(r, pollInterval));
+                    const elapsed = Math.round((Date.now() - startTime) / 1000);
+
+                    if (settings.cnbApiToken && settings.cnbRepoPath && cnbServiceState.workspaceSn) {
+                        try {
+                            const buildResult = await cnbApiCall(`/build-status/${encodeURIComponent(settings.cnbRepoPath)}/${cnbServiceState.workspaceSn}`);
+                            const pipeline = buildResult?.pipelinesStatus?.[Object.keys(buildResult?.pipelinesStatus || {})[0]];
+                            if (pipeline) {
+                                const pStatus = pipeline.status?.toLowerCase();
+                                let stageText = '环境准备中';
+                                if (pStatus === 'prepare') stageText = '环境准备中';
+                                else if (pStatus === 'running') stageText = '服务启动中';
+                                else if (pStatus === 'success') stageText = '构建完成';
+
+                                cnbSetupUpdateStep('wait', 'active', `${stageText} (${elapsed}秒)`);
+                                const timeRatio = Math.min(0.85, (Date.now() - startTime) / timeout);
+                                cnbUpdateStatusUI('waking', `${stageText}... (${elapsed}秒)`, {
+                                    progress: 30 + Math.round(timeRatio * 40),
+                                    stageLabel: stageText,
+                                    detail: { elapsed, workspaceSn: cnbServiceState.workspaceSn || '' },
+                                });
+                            }
+                        } catch (_) { }
+                    }
+
+                    const wsCheck = await cnbCheckWorkspaceStatus();
+                    if (wsCheck.running) {
+                        workspaceReady = true;
+                        cnbSetupLog('success', `环境已就绪! (耗时 ${elapsed}秒)`);
+                        break;
+                    }
+                }
+
+                if (!workspaceReady) {
+                    throw { step: 'wait', message: `等待超时 (${Math.round(timeout / 1000)}秒)，环境未就绪`, hint: 'CNB冷启动通常需要60-180秒，可尝试增加启动超时时间后重试' };
+                }
+
+                cnbSetupUpdateStep('wait', 'done');
+            }
+        }
+
+        // Step 4: Establish SSH Tunnel
+        if (startFrom <= 3) {
+            cnbSetupUpdateStep('tunnel', 'active', '正在建立SSH隧道...');
+            cnbSetupLog('info', '建立SSH隧道连接...');
+            cnbUpdateStatusUI('waking', '建立SSH隧道...', { progress: 80, stageLabel: '建立隧道' });
+
+            let tunnelUrl = null;
+            const wsStatus3 = await cnbCheckWorkspaceStatus();
+            if (wsStatus3.localTunnelUrl) {
+                tunnelUrl = wsStatus3.localTunnelUrl;
+                cnbSetupLog('success', `SSH隧道已存在: ${tunnelUrl}`);
+            } else {
+                try {
+                    const tunnelResult = await cnbApiCall('/setup-tunnel', { method: 'POST', timeout: 20000 });
+                    if (tunnelResult.localTunnelUrl) {
+                        tunnelUrl = tunnelResult.localTunnelUrl;
+                        cnbSetupLog('success', `SSH隧道建立成功: ${tunnelUrl}`);
+                    }
+                } catch (e) {
+                    cnbSetupLog('warn', `SSH隧道建立失败: ${e.message}`);
+                }
+            }
+
+            if (!tunnelUrl) {
+                cnbSetupLog('warn', 'SSH隧道不可用，将使用CNB Web代理URL（可能需要浏览器认证）');
+                cnbSetupUpdateStep('tunnel', 'skipped', 'SSH隧道不可用，使用Web代理');
+            } else {
+                cnbSetupUpdateStep('tunnel', 'done', `隧道地址: ${tunnelUrl}`);
+            }
+        }
+
+        // Step 5: Sync ComfyUI URL
+        if (startFrom <= 4) {
+            cnbSetupUpdateStep('sync', 'active', '正在提取并同步ComfyUI URL...');
+            cnbSetupLog('info', '同步ComfyUI URL到图像生成模块...');
+            cnbUpdateStatusUI('waking', '同步ComfyUI URL...', { progress: 90, stageLabel: '同步URL' });
+
+            await cnbSyncComfyUrl(settings);
+
+            const syncedUrl = extension_settings.sd?.comfy_url || '';
+            if (syncedUrl) {
+                cnbSetupLog('success', `ComfyUI URL已同步: ${syncedUrl}`);
+                cnbSetupUpdateStep('sync', 'done', `URL: ${syncedUrl}`);
+            } else {
+                throw { step: 'sync', message: '无法确定ComfyUI URL', hint: '请检查SSH密钥配置或尝试手动输入URL' };
+            }
+        }
+
+        // Step 6: Connection Test
+        if (startFrom <= 5) {
+            cnbSetupUpdateStep('test', 'active', '正在测试ComfyUI连接...');
+            cnbSetupLog('info', '测试ComfyUI服务连接...');
+            cnbUpdateStatusUI('waking', '测试连接...', { progress: 95, stageLabel: '连接测试' });
+
+            const comfyUrl = extension_settings.sd?.comfy_url || '';
+            let testOk = false;
+            let testDetail = '';
+
+            if (comfyUrl.startsWith('http://127.0.0.1:') || comfyUrl.startsWith('http://localhost:')) {
+                try {
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 10000);
+                    const response = await fetch(`${comfyUrl}/system_stats`, {
+                        method: 'GET',
+                        signal: controller.signal,
+                    });
+                    clearTimeout(timeoutId);
+                    if (response.ok) {
+                        const data = await response.json();
+                        testOk = true;
+                        testDetail = `ComfyUI ${data.system?.comfyui_version || ''} | ${data.devices?.[0]?.name || 'GPU'}`;
+                    } else {
+                        testDetail = `HTTP ${response.status}`;
+                    }
+                } catch (e) {
+                    testDetail = e.message;
+                }
+            } else if (comfyUrl.startsWith('https://cnb.cool/')) {
+                try {
+                    const proxyResult = await cnbApiCall('/comfyui-proxy/system_stats', { timeout: 15000 });
+                    testOk = true;
+                    testDetail = `ComfyUI ${proxyResult.system?.comfyui_version || ''} (代理)`;
+                } catch (e) {
+                    testDetail = `代理访问失败: ${e.message}`;
+                }
+            }
+
+            if (testOk) {
+                cnbSetupLog('success', `连接测试成功! ${testDetail}`);
+                cnbSetupUpdateStep('test', 'done', testDetail);
+            } else {
+                cnbSetupLog('warn', `连接测试失败: ${testDetail}（ComfyUI可能仍在启动中）`);
+                cnbSetupUpdateStep('test', 'done', '连接测试完成（ComfyUI可能仍在启动中）');
+            }
+        }
+
+        // Final Success
+        cnbServiceState.status = 'online';
+        cnbServiceState.lastWake = new Date().toISOString();
+        cnbServiceState.consecutiveFailures = 0;
+        cnbServiceState.isWaking = false;
+        cnbServiceState.wakePromise = null;
+        cnbServiceState.lastActivity = new Date().toISOString();
+
+        const finalUrl = extension_settings.sd?.comfy_url || '';
+        cnbUpdateStatusUI('online', '服务在线 - 一键启动完成', {
+            progress: 100,
+            stageLabel: '启动完成',
+            detail: {
+                comfyUrl: finalUrl,
+                workspaceSn: cnbServiceState.workspaceSn || '',
+            },
+        });
+
+        cnbSetupLog('success', '🎉 一键启动流程完成! ComfyUI已就绪');
+        showToast('🎉 CNB ComfyUI一键启动完成!', 'success');
+
+        if (settings.cnbKeepAlive) cnbStartKeepAlive();
+        cnbResetAutoStopTimer();
+
+        cnbSetupState.running = false;
+        if (startBtn) startBtn.disabled = false;
+        return true;
+
+    } catch (err) {
+        const step = err.step || 'unknown';
+        const message = err.message || String(err);
+        const hint = err.hint || '';
+
+        cnbSetupState.failedStep = step;
+        cnbSetupState.errorMessage = message;
+
+        cnbSetupUpdateStep(step, 'error', message);
+        cnbSetupLog('error', `步骤 "${step}" 失败: ${message}`);
+        if (hint) cnbSetupLog('warn', `💡 建议: ${hint}`);
+
+        cnbServiceState.status = 'offline';
+        cnbServiceState.isWaking = false;
+        cnbServiceState.wakePromise = null;
+
+        cnbUpdateStatusUI('offline', `启动失败: ${message}`, {
+            progress: 0,
+            stageLabel: '启动失败',
+            detail: { error: message, hint },
+        });
+
+        showToast(`❌ 启动失败: ${message}`, 'error');
+        cnbSetupShowRetry(true);
+
+        cnbSetupState.running = false;
+        if (startBtn) startBtn.disabled = false;
+        return false;
+    }
+}
+
 async function cnbEnsureServiceReady() {
     const settings = getSettings();
     if (!settings.cnbEnabled) return true;
 
-    const comfyUrl = extension_settings.sd?.comfy_url || 'http://127.0.0.1:8188';
-    const status = await cnbCheckComfyStatus(comfyUrl);
-
-    if (status.online) {
-        cnbServiceState.status = 'online';
-        cnbServiceState.lastCheck = new Date().toISOString();
-        cnbServiceState.consecutiveFailures = 0;
-        cnbUpdateStatusUI('online', '服务在线');
-        return true;
+    if (settings.cnbApiToken && settings.cnbRepoPath) {
+        const wsStatus = await cnbCheckWorkspaceStatus();
+        if (wsStatus.running) {
+            cnbServiceState.status = 'online';
+            cnbServiceState.lastCheck = new Date().toISOString();
+            cnbServiceState.consecutiveFailures = 0;
+            cnbUpdateStatusUI('online', '服务在线');
+            cnbResetAutoStopTimer();
+            return true;
+        }
+    } else {
+        const comfyUrl = extension_settings.sd?.comfy_url || 'http://127.0.0.1:8188';
+        const status = await cnbCheckComfyStatus(comfyUrl);
+        if (status.online) {
+            cnbServiceState.status = 'online';
+            cnbServiceState.lastCheck = new Date().toISOString();
+            cnbServiceState.consecutiveFailures = 0;
+            cnbUpdateStatusUI('online', '服务在线');
+            cnbResetAutoStopTimer();
+            return true;
+        }
     }
 
     cnbServiceState.consecutiveFailures++;
 
     if (settings.cnbAutoWake) {
         console.log('[Story-Images CNB] Service offline, auto-waking...');
-        cnbUpdateStatusUI('offline', '服务离线，正在唤醒...');
-        return await cnbWakeService();
+        cnbUpdateStatusUI('offline', '服务离线，正在自动启动...');
+        return await cnbAutoSetup();
     }
 
     cnbServiceState.status = 'offline';
@@ -406,6 +1413,22 @@ function cnbStartKeepAlive() {
     console.log(`[Story-Images CNB] Keep-alive started (interval: ${settings.cnbKeepAliveInterval || 300}秒)`);
 
     cnbServiceState.keepAliveTimer = setInterval(async () => {
+        if (settings.cnbApiToken && settings.cnbRepoPath) {
+            try {
+                const wsStatus = await cnbCheckWorkspaceStatus();
+                if (wsStatus.running) {
+                    cnbServiceState.status = 'online';
+                    cnbServiceState.lastCheck = new Date().toISOString();
+                    cnbServiceState.consecutiveFailures = 0;
+                    cnbUpdateStatusUI('online', '服务在线 (keep-alive)');
+                    console.log('[Story-Images CNB] Keep-alive: workspace running');
+                    return;
+                }
+            } catch (e) {
+                console.warn('[Story-Images CNB] Keep-alive workspace check failed:', e.message);
+            }
+        }
+
         const comfyUrl = extension_settings.sd?.comfy_url || 'http://127.0.0.1:8188';
         const status = await cnbCheckComfyStatus(comfyUrl);
 
@@ -421,8 +1444,8 @@ function cnbStartKeepAlive() {
 
             if (cnbServiceState.consecutiveFailures >= 2 && settings.cnbAutoWake) {
                 console.log('[Story-Images CNB] Service went offline, auto-waking via keep-alive...');
-                cnbUpdateStatusUI('offline', '检测到离线，正在唤醒...');
-                cnbWakeService();
+                cnbUpdateStatusUI('offline', '检测到离线，正在自动启动...');
+                cnbAutoSetup();
             } else {
                 cnbServiceState.status = 'offline';
                 cnbUpdateStatusUI('offline', '服务离线');
@@ -446,26 +1469,45 @@ function cnbStartStatusPolling() {
 
     cnbServiceState.pollTimer = setInterval(async () => {
         if (cnbServiceState.isWaking) return;
-        const comfyUrl = extension_settings.sd?.comfy_url || 'http://127.0.0.1:8188';
-        const status = await cnbCheckComfyStatus(comfyUrl);
         const prevStatus = cnbServiceState.status;
 
-        if (status.online) {
-            cnbServiceState.status = 'online';
-            cnbServiceState.lastCheck = new Date().toISOString();
-            cnbServiceState.consecutiveFailures = 0;
-            if (prevStatus !== 'online') {
-                cnbUpdateStatusUI('online', '服务在线');
-            } else {
-                cnbUpdateStatusUI('online', '服务在线');
+        if (settings.cnbApiToken && settings.cnbRepoPath) {
+            try {
+                const wsStatus = await cnbCheckWorkspaceStatus();
+                if (wsStatus.running) {
+                    cnbServiceState.status = 'online';
+                    cnbServiceState.lastCheck = new Date().toISOString();
+                    cnbServiceState.consecutiveFailures = 0;
+                    cnbUpdateStatusUI('online', '服务在线');
+                } else {
+                    cnbServiceState.consecutiveFailures++;
+                    if (cnbServiceState.consecutiveFailures >= 2) {
+                        cnbServiceState.status = 'offline';
+                        cnbUpdateStatusUI('offline', '服务离线');
+                    } else {
+                        cnbUpdateStatusUI('checking', '检测中...');
+                    }
+                }
+            } catch (e) {
+                cnbServiceState.consecutiveFailures++;
+                cnbUpdateStatusUI('offline', '检测失败');
             }
         } else {
-            cnbServiceState.consecutiveFailures++;
-            if (cnbServiceState.consecutiveFailures >= 2) {
-                cnbServiceState.status = 'offline';
-                cnbUpdateStatusUI('offline', '服务离线');
+            const comfyUrl = extension_settings.sd?.comfy_url || 'http://127.0.0.1:8188';
+            const status = await cnbCheckComfyStatus(comfyUrl);
+            if (status.online) {
+                cnbServiceState.status = 'online';
+                cnbServiceState.lastCheck = new Date().toISOString();
+                cnbServiceState.consecutiveFailures = 0;
+                cnbUpdateStatusUI('online', '服务在线');
             } else {
-                cnbUpdateStatusUI('checking', '检测中...');
+                cnbServiceState.consecutiveFailures++;
+                if (cnbServiceState.consecutiveFailures >= 2) {
+                    cnbServiceState.status = 'offline';
+                    cnbUpdateStatusUI('offline', '服务离线');
+                } else {
+                    cnbUpdateStatusUI('checking', '检测中...');
+                }
             }
         }
     }, 30000);
@@ -478,14 +1520,25 @@ function cnbStopStatusPolling() {
     }
 }
 
-function cnbUpdateStatusUI(status, message) {
+const cnbStartupStages = [
+    { key: 'init', label: '初始化', progress: 5 },
+    { key: 'request', label: '发送启动请求', progress: 15 },
+    { key: 'prepare', label: '环境准备中', progress: 40 },
+    { key: 'building', label: '构建工作空间', progress: 65 },
+    { key: 'starting', label: '服务启动中', progress: 85 },
+    { key: 'syncing', label: '同步配置', progress: 95 },
+    { key: 'done', label: '启动完成', progress: 100 },
+];
+
+function cnbUpdateStatusUI(status, message, extra) {
+    const settings = getSettings();
     const statusEl = document.getElementById('si_cnb_status');
     if (!statusEl) return;
 
     const statusConfig = {
         online: { icon: '🟢', color: '#00c864', label: '在线' },
         offline: { icon: '🔴', color: '#ff5050', label: '离线' },
-        waking: { icon: '🟡', color: '#ffc800', label: '唤醒中' },
+        waking: { icon: '🟡', color: '#ffc800', label: '启动中' },
         checking: { icon: '🔵', color: '#4a9eff', label: '检测中' },
         unknown: { icon: '⚪', color: '#888', label: '未知' },
     };
@@ -497,17 +1550,72 @@ function cnbUpdateStatusUI(status, message) {
     const lastWake = cnbServiceState.lastWake
         ? new Date(cnbServiceState.lastWake).toLocaleTimeString()
         : '无';
+    const snInfo = cnbServiceState.workspaceSn
+        ? ` | SN: ${cnbServiceState.workspaceSn.substring(0, 12)}...`
+        : '';
+    const autoStopInfo = settings.cnbAutoStop && cnbServiceState.lastActivity
+        ? ` | 自动停止: ${settings.cnbAutoStopDelay || 30}分钟`
+        : '';
+
+    let progressHtml = '';
+    if (extra?.progress !== undefined) {
+        const pct = Math.min(100, Math.max(0, extra.progress));
+        const stageLabel = extra.stageLabel || '';
+        const barColor = status === 'online' ? '#00c864' : status === 'offline' ? '#ff5050' : '#4a9eff';
+        const animClass = status === 'waking' ? 'si-progress-animated' : '';
+        progressHtml = `
+            <div style="margin: 6px 0 4px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 3px;">
+                    <span style="font-size: 10px; color: #ccc;">${escapeHtml(stageLabel)}</span>
+                    <span style="font-size: 10px; color: ${barColor}; font-weight: bold;">${pct}%</span>
+                </div>
+                <div style="width: 100%; height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; overflow: hidden;">
+                    <div class="${animClass}" style="width: ${pct}%; height: 100%; background: ${barColor}; border-radius: 3px; transition: width 0.5s ease;"></div>
+                </div>
+            </div>
+        `;
+    }
+
+    let detailHtml = '';
+    if (extra?.detail) {
+        const d = extra.detail;
+        const items = [];
+        if (d.workspaceSn) items.push(`<span>SN: ${escapeHtml(d.workspaceSn.substring(0, 16))}...</span>`);
+        if (d.branch) items.push(`<span>分支: ${escapeHtml(d.branch)}</span>`);
+        if (d.duration) items.push(`<span>运行时长: ${cnbFormatDuration(d.duration)}</span>`);
+        if (d.comfyUrl) items.push(`<span style="word-break: break-all;">URL: ${escapeHtml(d.comfyUrl)}</span>`);
+        if (d.error) items.push(`<span style="color: #ff8080;">⚠ ${escapeHtml(d.error)}</span>`);
+        if (d.buildStage) items.push(`<span>构建阶段: ${escapeHtml(d.buildStage)}</span>`);
+        if (d.elapsed) items.push(`<span>已等待: ${d.elapsed}秒</span>`);
+        if (items.length) {
+            detailHtml = `<div style="margin-top: 6px; padding: 5px 6px; background: rgba(0,0,0,0.15); border-radius: 3px; font-size: 10px; color: #aaa; display: flex; flex-direction: column; gap: 2px;">${items.join('')}</div>`;
+        }
+    }
 
     statusEl.innerHTML = `
-        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
+        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
             <span style="font-size: 16px;">${cfg.icon}</span>
             <span style="color: ${cfg.color}; font-weight: bold;">${cfg.label}</span>
-            <span style="color: #888; font-size: 11px;">${message || ''}</span>
+            <span style="color: #888; font-size: 11px;">${escapeHtml(message || '')}</span>
         </div>
-        <div style="font-size: 10px; color: #666;">
-            上次检测: ${lastCheck} | 上次唤醒: ${lastWake}
+        ${progressHtml}
+        ${detailHtml}
+        <div style="font-size: 10px; color: #666; margin-top: 4px;">
+            上次检测: ${lastCheck} | 上次启动: ${lastWake}${snInfo}${autoStopInfo}
         </div>
     `;
+}
+
+function cnbFormatDuration(ms) {
+    if (!ms) return '0秒';
+    const sec = Math.floor(ms / 1000);
+    if (sec < 60) return `${sec}秒`;
+    const min = Math.floor(sec / 60);
+    const remSec = sec % 60;
+    if (min < 60) return `${min}分${remSec}秒`;
+    const hr = Math.floor(min / 60);
+    const remMin = min % 60;
+    return `${hr}时${remMin}分`;
 }
 
 const REMOTE_API_PRESETS = [
@@ -667,37 +1775,9 @@ function getModelMatchInfo(styleKey) {
 
 
 function applyStyleToSdConfig(styleKey) {
-    const sd = extension_settings.sd;
-    if (!sd) return;
     const styleConfig = getStyleConfig();
     if (!styleConfig || !styleConfig.promptPrefix) return;
-
-    sd.prompt_prefix = styleConfig.promptPrefix;
-    sd.scale = styleConfig.scale;
-    sd.steps = styleConfig.steps;
-    sd.sampler = styleConfig.sampler;
-
-    if (styleConfig.negativeExtra) {
-        const base = sd.negative_prompt || '';
-        if (!base.includes(styleConfig.negativeExtra.trim().substring(2))) {
-            sd.negative_prompt = base + styleConfig.negativeExtra;
-        }
-    }
-
-    if (styleConfig.workflow && sd.source === 'comfy') {
-        sd.comfy_workflow = styleConfig.workflow;
-    }
-
-    if (styleConfig.size) {
-        const parts = styleConfig.size.split('x');
-        if (parts.length === 2) {
-            sd.width = parseInt(parts[0]) || sd.width;
-            sd.height = parseInt(parts[1]) || sd.height;
-        }
-    }
-
-    saveSettingsDebounced();
-    console.log(`[Story-Images] Applied style config to SD: ${styleConfig.label} | CFG=${styleConfig.scale} Steps=${styleConfig.steps} Sampler=${styleConfig.sampler} Size=${styleConfig.size || 'default'}`);
+    console.log(`[Story-Images] Style config ready: ${styleConfig.label} | CFG=${styleConfig.scale} Steps=${styleConfig.steps} Sampler=${styleConfig.sampler} Size=${styleConfig.size || 'default'} (applied temporarily during generation only)`);
 }
 
 async function autoSwitchModel(styleKey) {
@@ -844,7 +1924,7 @@ async function expandPromptWithOllama(description, charPrompt) {
         body: JSON.stringify({
             model: model,
             messages: [
-                { role: 'system', content: EXPANSION_SYSTEM_PROMPT },
+                { role: 'system', content: getExpansionSystemPrompt() },
                 { role: 'user', content: userPrompt },
             ],
             stream: false,
@@ -868,7 +1948,7 @@ async function expandPromptWithOllama(description, charPrompt) {
 }
 
 async function expandPromptWithSTLLM(description, charPrompt) {
-    const prompt = `${EXPANSION_SYSTEM_PROMPT}\n\n${EXPANSION_USER_TEMPLATE}`
+    const prompt = `${getExpansionSystemPrompt()}\n\n${EXPANSION_USER_TEMPLATE}`
         .replace('{description}', description)
         .replace('{charPrompt}', charPrompt || 'no specific character tags');
 
@@ -963,7 +2043,7 @@ async function expandPromptWithRemoteApi(description, charPrompt) {
             body: JSON.stringify({
                 model: model,
                 messages: [
-                    { role: 'system', content: EXPANSION_SYSTEM_PROMPT },
+                    { role: 'system', content: getExpansionSystemPrompt() },
                     { role: 'user', content: userPrompt },
                 ],
                 temperature: 0.5,
@@ -1848,33 +2928,26 @@ async function generateImageForTag(description, charName, tagType) {
         showToast(`提示词质量较低(${quality.score}分)，缺少: ${quality.missing.join(', ')}`, 'info');
     }
 
-    const savedFreeExtend = sd.free_extend;
-    const savedCommandVisible = sd.command_visible;
-    const savedPromptPrefix = sd.prompt_prefix;
-    const savedScale = sd.scale;
-    const savedSteps = sd.steps;
-    const savedSampler = sd.sampler;
-    const savedNegative = sd.negative_prompt;
-    const savedComfyWorkflow = sd.comfy_workflow;
-
-    sd.free_extend = false;
-    sd.command_visible = false;
-    sd.prompt_prefix = styleConfig.promptPrefix;
-    sd.scale = styleConfig.scale;
-    sd.steps = styleConfig.steps;
-    sd.sampler = styleConfig.sampler;
+    const sdOverrides = {
+        free_extend: false,
+        command_visible: false,
+        prompt_prefix: styleConfig.promptPrefix,
+        scale: styleConfig.scale,
+        steps: styleConfig.steps,
+        sampler: styleConfig.sampler,
+    };
 
     if (styleConfig.negativeExtra) {
-        const base = savedNegative || '';
+        const base = sd.negative_prompt || '';
         if (!base.includes(styleConfig.negativeExtra.trim().substring(2))) {
-            sd.negative_prompt = base + styleConfig.negativeExtra;
+            sdOverrides.negative_prompt = base + styleConfig.negativeExtra;
         }
     }
 
     if (styleConfig.workflow && sd.source === 'comfy' && !settings.comfyWorkflow) {
-        sd.comfy_workflow = styleConfig.workflow;
+        sdOverrides.comfy_workflow = styleConfig.workflow;
     } else if (settings.comfyWorkflow && sd.source === 'comfy') {
-        sd.comfy_workflow = settings.comfyWorkflow;
+        sdOverrides.comfy_workflow = settings.comfyWorkflow;
     }
 
     const args = {};
@@ -1883,7 +2956,7 @@ async function generateImageForTag(description, charName, tagType) {
         args.negative = charNegative;
     }
 
-    try {
+    return await withSdSettings(sdOverrides, async () => {
         showToast(`正在生成图片[${styleConfig.label}][${isDirectMode ? '中文直通' : '英文翻译'}]: ${description.substring(0, 30)}...`, 'info');
 
         let trigger;
@@ -1894,57 +2967,72 @@ async function generateImageForTag(description, charName, tagType) {
             trigger = `{{charPrefix}}${sceneSpecific}`;
         }
 
-        const result = await globalThis.generatePicture('command', args, trigger);
+        try {
+            let result = await globalThis.generatePicture('command', args, trigger);
 
-        logGeneration({
-            originalDescription: description,
-            expandedPrompt: expandedPrompt,
-            finalPrompt: finalPrompt,
-            qualityScore: quality.score,
-            qualityMissing: quality.missing,
-            charName: charName,
-            tagType: tagType,
-            expansionMethod: isDirectMode ? 'direct' : settings.expansionMethod,
-            style: settings.style || 'anime',
-            comfyWorkflow: settings.comfyWorkflow || sd.comfy_workflow || 'default',
-            success: !!result,
-        });
+            logGeneration({
+                originalDescription: description,
+                expandedPrompt: expandedPrompt,
+                finalPrompt: finalPrompt,
+                qualityScore: quality.score,
+                qualityMissing: quality.missing,
+                charName: charName,
+                tagType: tagType,
+                expansionMethod: isDirectMode ? 'direct' : settings.expansionMethod,
+                style: settings.style || 'anime',
+                comfyWorkflow: settings.comfyWorkflow || sd.comfy_workflow || 'default',
+                success: !!result,
+            });
 
-        if (result) {
-            showToast('图片生成成功!', 'success');
-        } else {
-            console.warn('[Story-Images] generatePicture returned undefined');
-            showToast('图片生成未返回结果', 'error');
+            if (result && !quality.passed && settings.autoRetryOnLowQuality && (settings.maxRetries || 1) > 0) {
+                showToast(`提示词质量较低(${quality.score}分)，正在自动重试...`, 'info');
+                const retryPrompt = finalPrompt + ', ' + quality.missing.map(m => {
+                    const defaults = { subject: '1girl', action: 'standing', clothing: 'dress', expression: 'smile', camera: 'upper_body', setting: 'indoors', lighting: 'soft_lighting' };
+                    return defaults[m] || '';
+                }).filter(Boolean).join(', ');
+                const retryTrigger = isDirectMode ? retryPrompt : trigger;
+                result = await globalThis.generatePicture('command', args, retryTrigger);
+                logGeneration({
+                    originalDescription: description,
+                    expandedPrompt: expandedPrompt,
+                    finalPrompt: retryPrompt,
+                    qualityScore: quality.score,
+                    charName: charName,
+                    tagType: tagType,
+                    expansionMethod: isDirectMode ? 'direct' : settings.expansionMethod,
+                    style: settings.style || 'anime',
+                    success: !!result,
+                    retry: true,
+                });
+            }
+
+            if (result) {
+                showToast('图片生成成功!', 'success');
+            } else {
+                console.warn('[Story-Images] generatePicture returned undefined');
+                showToast('图片生成未返回结果', 'error');
+            }
+            return result;
+        } catch (err) {
+            console.error('[Story-Images] Generation error:', err);
+            showToast(`图片生成失败: ${err.message}`, 'error');
+
+            logGeneration({
+                originalDescription: description,
+                expandedPrompt: expandedPrompt,
+                finalPrompt: finalPrompt,
+                qualityScore: quality.score,
+                charName: charName,
+                tagType: tagType,
+                expansionMethod: isDirectMode ? 'direct' : settings.expansionMethod,
+                style: settings.style || 'anime',
+                success: false,
+                error: err.message,
+            });
+
+            return null;
         }
-        return result;
-    } catch (err) {
-        console.error('[Story-Images] Generation error:', err);
-        showToast(`图片生成失败: ${err.message}`, 'error');
-
-        logGeneration({
-            originalDescription: description,
-            expandedPrompt: expandedPrompt,
-            finalPrompt: finalPrompt,
-            qualityScore: quality.score,
-            charName: charName,
-            tagType: tagType,
-            expansionMethod: isDirectMode ? 'direct' : settings.expansionMethod,
-            style: settings.style || 'anime',
-            success: false,
-            error: err.message,
-        });
-
-        return null;
-    } finally {
-        sd.free_extend = savedFreeExtend;
-        sd.command_visible = savedCommandVisible;
-        sd.prompt_prefix = savedPromptPrefix;
-        sd.scale = savedScale;
-        sd.steps = savedSteps;
-        sd.sampler = savedSampler;
-        sd.negative_prompt = savedNegative;
-        sd.comfy_workflow = savedComfyWorkflow;
-    }
+    });
 }
 
 async function processTagInMessage(messageId) {
@@ -2006,7 +3094,7 @@ async function processTagInMessage(messageId) {
                         ''
                     );
                 } else {
-                    const tagSpan = `<span class="si-auto-generated" style="display:inline-flex;align-items:center;gap:4px;color:#8cc8ff;background:rgba(74,158,255,0.1);border-radius:3px;padding:1px 6px;font-size:0.9em;" data-si-mesid="${messageId}" data-si-desc="${tag.description.replace(/"/g, '&quot;')}" data-si-type="${tag.type}" data-si-label="${tag.label}"><span class="si-auto-label">🖼️${tag.label}已生成</span><button class="si-regen-btn" title="重新生成图片">🔄</button></span>`;
+                    const tagSpan = `<span class="si-auto-generated" style="display:inline-flex;align-items:center;gap:4px;color:#8cc8ff;background:rgba(74,158,255,0.1);border-radius:3px;padding:1px 6px;font-size:0.9em;" data-si-mesid="${messageId}" data-si-desc="${escapeHtml(tag.description)}" data-si-type="${escapeHtml(tag.type)}" data-si-label="${escapeHtml(tag.label)}"><span class="si-auto-label">🖼️${escapeHtml(tag.label)}已生成</span><button class="si-regen-btn" title="重新生成图片">🔄</button></span>`;
                     mesElement.innerHTML = mesElement.innerHTML.replace(
                         new RegExp(tag.fullTag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'),
                         tagSpan
@@ -2070,8 +3158,8 @@ function scanAndInjectButtons(messageId) {
 
             if (!tagInHtmlRegex.test(html)) continue;
 
-            const buttonHtml = `<span class="si-manual-injected" data-si-key="${tagKey}" data-si-mesid="${messageId}" data-si-desc="${description.replace(/"/g, '&quot;')}" data-si-type="${tagDef.type}" data-si-label="${tagDef.label}" data-si-fulltag="${fullTag.replace(/"/g, '&quot;')}">` +
-                `<span class="si-tag-text">${fullTag}</span>` +
+            const buttonHtml = `<span class="si-manual-injected" data-si-key="${escapeHtml(tagKey)}" data-si-mesid="${messageId}" data-si-desc="${escapeHtml(description)}" data-si-type="${escapeHtml(tagDef.type)}" data-si-label="${escapeHtml(tagDef.label)}" data-si-fulltag="${escapeHtml(fullTag)}">` +
+                `<span class="si-tag-text">${escapeHtml(fullTag)}</span>` +
                 `<button class="si-gen-btn${alreadyGenerated ? ' si-gen-done' : ''}" title="${alreadyGenerated ? '点击重新生成图片' : '点击生成图片'}">` +
                 `<span class="si-gen-btn-icon">${alreadyGenerated ? '🔄' : '🖼️'}</span>` +
                 `<span class="si-gen-btn-text">${alreadyGenerated ? '重新生成' : '生成图片'}</span>` +
@@ -2403,8 +3491,8 @@ function processChoiceButtons(messageId) {
     });
 
     const buttonsHtml = buttons.map((btn, idx) => {
-        const escapedSend = btn.sendText.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-        const escapedLabel = btn.label.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const escapedSend = escapeHtml(btn.sendText);
+        const escapedLabel = escapeHtml(btn.label);
         return `<div class="si-choice-option" data-si-send="${escapedSend}" data-si-mesid="${messageId}" title="点击选择: ${escapedSend}">` +
             `<span class="si-choice-key">${String.fromCharCode(65 + idx)}</span>` +
             `<span class="si-choice-label">${escapedLabel}</span>` +
@@ -2636,10 +3724,10 @@ async function testComfyConnectionCommand() {
     } else {
         result += `\n❌ ComfyUI服务离线 (${status.error || '无法连接'})`;
         if (settings.cnbEnabled && settings.cnbAutoWake) {
-            result += `\n正在尝试自动唤醒...`;
-            showToast('ComfyUI离线，正在尝试唤醒...', 'info');
-            const wakeSuccess = await cnbWakeService();
-            result += wakeSuccess ? `\n✅ 唤醒成功!` : `\n❌ 唤醒失败`;
+            result += `\n正在尝试自动启动...`;
+            showToast('ComfyUI离线，正在尝试启动...', 'info');
+            const wakeSuccess = await cnbAutoSetup();
+            result += wakeSuccess ? `\n✅ 启动成功!` : `\n❌ 启动失败`;
         }
         showToast('❌ ComfyUI连接失败', 'error');
     }
@@ -2656,9 +3744,9 @@ async function cnbWakeCommand() {
         return 'CNB项目URL未配置，请在设置中填写';
     }
 
-    showToast('正在唤醒CNB ComfyUI服务...', 'info');
-    const success = await cnbWakeService();
-    return success ? '✅ CNB ComfyUI服务唤醒成功!' : '❌ CNB ComfyUI服务唤醒失败，请检查配置和服务状态';
+    showToast('正在启动CNB ComfyUI服务...', 'info');
+    const success = await cnbAutoSetup();
+    return success ? '✅ CNB ComfyUI服务启动成功!' : '❌ CNB ComfyUI服务启动失败，请检查配置和服务状态';
 }
 
 function registerSlashCommands() {
@@ -2774,11 +3862,24 @@ function registerSlashCommands() {
     SlashCommandParser.addCommandObject(SlashCommand.fromProps({
         name: 'cnb-wake',
         callback: cnbWakeCommand,
-        aliases: ['wake'],
-        returns: 'CNB wake result',
+        aliases: ['cnb-start', 'wake'],
+        returns: 'CNB service start result',
         namedArgumentList: [],
         unnamedArgumentList: [],
-        helpString: 'Manually wake up CNB ComfyUI service',
+        helpString: 'Start CNB ComfyUI workspace service',
+    }));
+
+    SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+        name: 'cnb-stop',
+        callback: async () => {
+            const success = await cnbStopService();
+            return success ? '✅ CNB ComfyUI服务已停止' : '❌ 停止服务失败';
+        },
+        aliases: [],
+        returns: 'CNB service stop result',
+        namedArgumentList: [],
+        unnamedArgumentList: [],
+        helpString: 'Stop CNB ComfyUI workspace service',
     }));
 }
 
@@ -2851,17 +3952,17 @@ async function loadSettingsUI() {
     if (remoteApiModels.length > 0) {
         for (const model of remoteApiModels) {
             const selected = settings.remoteApiModel === model ? 'selected' : '';
-            remoteModelOptionsHtml += `<option value="${model}" ${selected}>${model}</option>`;
+            remoteModelOptionsHtml += `<option value="${escapeHtml(model)}" ${selected}>${escapeHtml(model)}</option>`;
         }
     } else if (currentPreset.models.length > 0) {
         for (const model of currentPreset.models) {
             const selected = settings.remoteApiModel === model ? 'selected' : '';
-            remoteModelOptionsHtml += `<option value="${model}" ${selected}>${model}</option>`;
+            remoteModelOptionsHtml += `<option value="${escapeHtml(model)}" ${selected}>${escapeHtml(model)}</option>`;
         }
     } else {
         const currentModel = settings.remoteApiModel || '';
         if (currentModel) {
-            remoteModelOptionsHtml = `<option value="${currentModel}" selected>${currentModel}</option>`;
+            remoteModelOptionsHtml = `<option value="${escapeHtml(currentModel)}" selected>${escapeHtml(currentModel)}</option>`;
         } else {
             remoteModelOptionsHtml = '<option value="">点击刷新或手动输入</option>';
         }
@@ -2884,7 +3985,8 @@ async function loadSettingsUI() {
                 <code>/test-expansion &lt;描述&gt;</code> - 测试当前模式<br>
                 <code>/compare-modes &lt;描述&gt;</code> - 对比中英文模式<br>
                 <code>/test-comfy</code> - 测试ComfyUI连接及CNB状态<br>
-                <code>/cnb-wake</code> - 手动唤醒CNB ComfyUI服务<br>
+                <code>/cnb-wake</code> 或 <code>/cnb-start</code> - 启动CNB ComfyUI服务<br>
+                <code>/cnb-stop</code> - 停止CNB ComfyUI服务<br>
                 <br>
                 <strong>自动识别标签：</strong><br>
                 [图片：描述] [动图：描述] [📸图库新增：描述] [微信图片：描述]
@@ -2921,23 +4023,55 @@ async function loadSettingsUI() {
             <button id="si_refresh_workflows" class="si-action-btn si-action-refresh"><span class="si-action-icon">🔄</span><span class="si-action-text">刷新工作流列表</span></button>
             <div id="si_workflow_info" style="margin: 4px 0; padding: 6px; background: rgba(0,0,0,0.2); border-radius: 4px; font-size: 11px; color: #aaa; display: none;"></div>
 
-            <h4>☁️ CNB ComfyUI 自动唤醒</h4>
-            <div style="margin: 4px 0; padding: 6px; background: rgba(255,200,0,0.1); border-radius: 4px; font-size: 11px; color: #ffc800;">
-                解决CNB环境下ComfyUI空闲休眠问题，自动检测并唤醒服务
+            <h4>☁️ CNB ComfyUI 服务管理</h4>
+            <div style="margin: 4px 0; padding: 6px; background: rgba(74,158,255,0.1); border-radius: 4px; font-size: 11px; color: #8cc8ff;">
+                一键启动CNB云原生ComfyUI环境，自动完成Token验证、环境创建、URL提取和连接测试
             </div>
-            <label><input type="checkbox" id="si_cnb_enabled" ${settings.cnbEnabled ? 'checked' : ''}> 启用CNB自动唤醒</label>
+            <label><input type="checkbox" id="si_cnb_enabled" ${settings.cnbEnabled ? 'checked' : ''}> 启用CNB服务管理</label>
             <div id="si_cnb_config" style="display: ${settings.cnbEnabled ? 'block' : 'none'}; margin: 6px 0; padding: 8px; background: rgba(0,0,0,0.15); border: 1px solid rgba(71,85,105,0.3); border-radius: 6px;">
                 <div id="si_cnb_status" style="margin-bottom: 8px; padding: 8px; background: rgba(0,0,0,0.2); border-radius: 4px; font-size: 11px;">
                     <span style="color: #888;">⚪ 未检测</span>
                 </div>
+                <div style="margin-bottom: 8px; padding: 6px; background: rgba(74,158,255,0.08); border: 1px solid rgba(74,158,255,0.2); border-radius: 4px;">
+                    <div style="font-size: 11px; font-weight: bold; color: #8cc8ff; margin-bottom: 4px;">🔑 API认证配置</div>
+                    <label style="display:block; margin: 4px 0;">
+                        CNB API Token:
+                        <input type="password" id="si_cnb_api_token" value="${escapeHtml(settings.cnbApiToken || '')}" placeholder="在 cnb.cool 个人设置 → 访问令牌 中获取" style="margin-top: 2px;">
+                        <div style="font-size: 10px; color: #666; margin-top: 2px;">从 cnb.cool 个人设置 → 访问令牌 创建，需勾选workspace权限</div>
+                    </label>
+                    <button id="si_cnb_test_token" class="si-action-btn si-action-test" style="margin-top: 4px;"><span class="si-action-icon">🔑</span><span class="si-action-text">验证Token</span></button>
+                </div>
+                <div style="margin-bottom: 8px; padding: 6px; background: rgba(0,200,100,0.05); border: 1px solid rgba(0,200,100,0.15); border-radius: 4px;">
+                    <div style="font-size: 11px; font-weight: bold; color: #86efac; margin-bottom: 4px;">📦 仓库配置</div>
+                    <label style="display:block; margin: 4px 0;">
+                        仓库路径:
+                        <select id="si_cnb_repo_select" style="display: ${settings.cnbApiToken ? 'block' : 'none'}; margin-top: 2px; width: 100%;">
+                            <option value="">-- 验证Token后加载仓库列表 --</option>
+                            ${settings.cnbRepoPath ? `<option value="${escapeHtml(settings.cnbRepoPath)}" selected>${escapeHtml(settings.cnbRepoPath)}</option>` : ''}
+                        </select>
+                        <input type="text" id="si_cnb_repo_path" value="${escapeHtml(settings.cnbRepoPath || '')}" placeholder="组织名/仓库名 (如 my-org/comfyui-workspace)" style="margin-top: 2px; ${settings.cnbApiToken ? 'display:none;' : ''}">
+                        <div style="font-size: 10px; color: #666; margin-top: 2px;">CNB平台上ComfyUI项目的仓库路径，格式: 组织/仓库</div>
+                    </label>
+                    <label style="display:block; margin: 4px 0;">
+                        分支:
+                        <select id="si_cnb_branch_select" style="display: ${settings.cnbApiToken && settings.cnbRepoPath ? 'block' : 'none'}; margin-top: 2px; width: 100%;">
+                            <option value="">-- 选择仓库后加载分支列表 --</option>
+                            ${settings.cnbBranch ? `<option value="${escapeHtml(settings.cnbBranch)}" selected>${escapeHtml(settings.cnbBranch)}</option>` : ''}
+                        </select>
+                        <input type="text" id="si_cnb_branch" value="${escapeHtml(settings.cnbBranch || 'main')}" placeholder="main" style="margin-top: 2px; ${settings.cnbApiToken && settings.cnbRepoPath ? 'display:none;' : ''}">
+                    </label>
+                </div>
+                <div style="margin-bottom: 8px; padding: 6px; background: rgba(255,200,0,0.05); border: 1px solid rgba(255,200,0,0.15); border-radius: 4px;">
+                    <div style="font-size: 11px; font-weight: bold; color: #ffc800; margin-bottom: 4px;">⚙️ 传统模式（备用）</div>
+                    <label style="display:block; margin: 4px 0;">
+                        CNB项目URL:
+                        <input type="text" id="si_cnb_project_url" value="${escapeHtml(settings.cnbProjectUrl || '')}" placeholder="https://xxx.cnb.cool 或 https://xxx.cnb.zone" style="margin-top: 2px;">
+                        <div style="font-size: 10px; color: #666; margin-top: 2px;">未配置API Token时使用传统no-cors唤醒模式</div>
+                    </label>
+                </div>
+                <label><input type="checkbox" id="si_cnb_auto_wake" ${settings.cnbAutoWake ? 'checked' : ''}> 自动启动（检测到离线时自动启动服务）</label>
                 <label style="display:block; margin: 4px 0;">
-                    CNB项目URL:
-                    <input type="text" id="si_cnb_project_url" value="${settings.cnbProjectUrl || ''}" placeholder="https://xxx.cnb.cool 或 https://xxx.cnb.zone" style="margin-top: 2px;">
-                    <div style="font-size: 10px; color: #666; margin-top: 2px;">CNB平台上ComfyUI项目的访问地址，用于唤醒休眠服务</div>
-                </label>
-                <label><input type="checkbox" id="si_cnb_auto_wake" ${settings.cnbAutoWake ? 'checked' : ''}> 自动唤醒（检测到离线时自动启动服务）</label>
-                <label style="display:block; margin: 4px 0;">
-                    唤醒超时:
+                    启动超时:
                     <div style="display: flex; align-items: center; gap: 6px; margin-top: 2px;">
                         <input type="range" id="si_cnb_wake_timeout" min="30" max="300" step="10" value="${settings.cnbWakeTimeout || 120}" style="flex: 1;">
                         <span id="si_cnb_wake_timeout_display" style="font-size: 11px; color: #94a3b8; min-width: 40px;">${settings.cnbWakeTimeout || 120}秒</span>
@@ -2950,7 +4084,7 @@ async function loadSettingsUI() {
                         <input type="range" id="si_cnb_poll_interval" min="3" max="30" step="1" value="${settings.cnbPollInterval || 5}" style="flex: 1;">
                         <span id="si_cnb_poll_interval_display" style="font-size: 11px; color: #94a3b8; min-width: 30px;">${settings.cnbPollInterval || 5}秒</span>
                     </div>
-                    <div style="font-size: 10px; color: #666; margin-top: 2px;">唤醒过程中检测服务状态的间隔时间</div>
+                    <div style="font-size: 10px; color: #666; margin-top: 2px;">启动过程中检测服务状态的间隔时间</div>
                 </label>
                 <label><input type="checkbox" id="si_cnb_keep_alive" ${settings.cnbKeepAlive ? 'checked' : ''}> 保持活跃（定期ping防止休眠）</label>
                 <div id="si_cnb_keep_alive_config" style="display: ${settings.cnbKeepAlive ? 'block' : 'none'}; margin: 4px 0 4px 20px;">
@@ -2963,9 +4097,34 @@ async function loadSettingsUI() {
                         <div style="font-size: 10px; color: #666; margin-top: 2px;">定期发送请求保持服务活跃，间隔过短可能消耗更多资源</div>
                     </label>
                 </div>
-                <div style="display: flex; gap: 6px; margin-top: 8px;">
-                    <button id="si_cnb_test_wake" class="si-action-btn si-action-test"><span class="si-action-icon">🔌</span><span class="si-action-text">手动唤醒</span></button>
+                <label><input type="checkbox" id="si_cnb_auto_stop" ${settings.cnbAutoStop ? 'checked' : ''}> 自动停止（空闲时自动关闭服务节省核时）</label>
+                <div id="si_cnb_auto_stop_config" style="display: ${settings.cnbAutoStop ? 'block' : 'none'}; margin: 4px 0 4px 20px;">
+                    <label style="display:block; margin: 4px 0;">
+                        空闲超时:
+                        <div style="display: flex; align-items: center; gap: 6px; margin-top: 2px;">
+                            <input type="range" id="si_cnb_auto_stop_delay" min="5" max="120" step="5" value="${settings.cnbAutoStopDelay || 30}" style="flex: 1;">
+                            <span id="si_cnb_auto_stop_delay_display" style="font-size: 11px; color: #94a3b8; min-width: 40px;">${settings.cnbAutoStopDelay || 30}分钟</span>
+                        </div>
+                        <div style="font-size: 10px; color: #666; margin-top: 2px;">无图片生成请求超过此时间后自动停止Workspace，节省CNB核时费用</div>
+                    </label>
+                </div>
+                <div class="si-setup-actions">
+                    <button id="si_cnb_start_service" class="si-action-btn si-action-test" style="font-weight: bold; padding: 8px 18px;"><span class="si-action-icon">🚀</span><span class="si-action-text">一键启动</span></button>
+                    <button id="si_cnb_stop_service" class="si-action-btn" style="border-color: rgba(255,80,80,0.35); color: #ff8080;"><span class="si-action-icon">⏹️</span><span class="si-action-text">停止服务</span></button>
                     <button id="si_cnb_check_status" class="si-action-btn si-action-refresh"><span class="si-action-icon">🔍</span><span class="si-action-text">检测状态</span></button>
+                </div>
+                <div id="si_cnb_steps" style="display: none; margin-top: 8px; padding: 8px; background: rgba(0,0,0,0.2); border: 1px solid rgba(74,158,255,0.15); border-radius: 6px;">
+                    <div style="font-size: 11px; font-weight: bold; color: #8cc8ff; margin-bottom: 6px;">📋 自动化流程进度</div>
+                    <div id="si_cnb_step_list">
+                        <div class="si-setup-step" data-step="validate"><div class="si-step-icon">1</div><div class="si-step-text">验证API Token和仓库<div class="si-step-sub">检查Token有效性和仓库可访问性</div></div></div>
+                        <div class="si-setup-step" data-step="start"><div class="si-step-icon">2</div><div class="si-step-text">启动云开发环境<div class="si-step-sub">创建并启动CNB Workspace</div></div></div>
+                        <div class="si-setup-step" data-step="wait"><div class="si-step-icon">3</div><div class="si-step-text">等待环境就绪<div class="si-step-sub">监控构建和服务启动状态</div></div></div>
+                        <div class="si-setup-step" data-step="tunnel"><div class="si-step-icon">4</div><div class="si-step-text">建立SSH隧道<div class="si-step-sub">创建本地端口转发获取访问地址</div></div></div>
+                        <div class="si-setup-step" data-step="sync"><div class="si-step-icon">5</div><div class="si-step-text">同步ComfyUI URL<div class="si-step-sub">提取访问地址并填入图像生成模块</div></div></div>
+                        <div class="si-setup-step" data-step="test"><div class="si-step-icon">6</div><div class="si-step-text">连接测试<div class="si-step-sub">验证ComfyUI服务可用性和响应状态</div></div></div>
+                    </div>
+                    <div id="si_cnb_log"></div>
+                    <button id="si_cnb_retry" class="si-retry-btn">🔄 重试</button>
                 </div>
             </div>
 
@@ -3206,14 +4365,139 @@ async function loadSettingsUI() {
         } else {
             cnbStopStatusPolling();
             cnbStopKeepAlive();
+            cnbClearAutoStopTimer();
         }
         loadSettingsUI();
+    });
+
+    document.getElementById('si_cnb_api_token')?.addEventListener('change', function () {
+        settings.cnbApiToken = this.value.trim();
+        saveSettingsDebounced();
+        showToast('CNB API Token已更新', 'success');
+        if (settings.cnbApiToken) {
+            cnbFetchRepos();
+        }
+    });
+
+    document.getElementById('si_cnb_repo_select')?.addEventListener('change', function () {
+        if (this.value === '__custom__') {
+            const textInput = document.getElementById('si_cnb_repo_path');
+            if (textInput) {
+                textInput.style.display = 'block';
+                textInput.focus();
+            }
+            settings.cnbRepoPath = '';
+            saveSettingsDebounced();
+            return;
+        }
+
+        const textInput = document.getElementById('si_cnb_repo_path');
+        if (textInput) textInput.style.display = 'none';
+
+        settings.cnbRepoPath = this.value;
+        saveSettingsDebounced();
+
+        if (this.value) {
+            const selectedOption = this.options[this.selectedIndex];
+            const defaultBranch = selectedOption?.dataset?.defaultBranch;
+            if (defaultBranch && !settings.cnbBranch) {
+                settings.cnbBranch = defaultBranch;
+                saveSettingsDebounced();
+            }
+            cnbFetchBranches(this.value);
+            showToast(`✅ 已选择仓库: ${this.value}`, 'success');
+        }
+    });
+
+    document.getElementById('si_cnb_repo_path')?.addEventListener('change', async function () {
+        const rawValue = this.value.trim();
+        
+        if (/:/.test(rawValue)) {
+            showToast('⚠️ 仓库路径包含冒号，请确认输入的是仓库路径而非描述文字。正确格式: 组织名/仓库名', 'error');
+            this.style.borderColor = '#ff5050';
+            return;
+        }
+        
+        if (/[^\x00-\x7F]/.test(rawValue)) {
+            showToast('⚠️ 仓库路径包含非ASCII字符（中文等），请确认路径是否正确。CNB仓库路径通常只包含英文、数字和连字符', 'error');
+            this.style.borderColor = '#ffc800';
+        } else {
+            this.style.borderColor = '';
+        }
+        
+        if (!rawValue.includes('/')) {
+            showToast('⚠️ 仓库路径格式错误，应为: 组织名/仓库名（如 my-org/comfyui）', 'error');
+            this.style.borderColor = '#ff5050';
+            return;
+        }
+
+        settings.cnbRepoPath = rawValue;
+        saveSettingsDebounced();
+        
+        if (settings.cnbApiToken && rawValue) {
+            try {
+                const result = await cnbApiCall(`/validate-repo?repo=${encodeURIComponent(rawValue)}`);
+                if (result.valid && result.exists) {
+                    showToast(`✅ 仓库验证通过: ${result.path}`, 'success');
+                    this.style.borderColor = '#00c864';
+                    if (result.defaultBranch) {
+                        settings.cnbBranch = result.defaultBranch;
+                        const branchSelect = document.getElementById('si_cnb_branch_select');
+                        if (branchSelect) branchSelect.value = result.defaultBranch;
+                        saveSettingsDebounced();
+                    }
+                    cnbFetchBranches(rawValue);
+                } else if (result.valid && !result.exists) {
+                    showToast(`⚠️ ${result.error}`, 'error');
+                    this.style.borderColor = '#ff5050';
+                } else {
+                    showToast(`⚠️ ${result.error}`, 'error');
+                    this.style.borderColor = '#ff5050';
+                }
+            } catch (e) {
+                showToast('仓库路径已更新', 'success');
+                cnbFetchBranches(rawValue);
+            }
+        } else {
+            showToast('仓库路径已更新', 'success');
+        }
+    });
+
+    document.getElementById('si_cnb_branch_select')?.addEventListener('change', function () {
+        if (this.value === '__custom__') {
+            const textInput = document.getElementById('si_cnb_branch');
+            if (textInput) {
+                textInput.style.display = 'block';
+                textInput.focus();
+            }
+            settings.cnbBranch = '';
+            saveSettingsDebounced();
+            return;
+        }
+
+        const textInput = document.getElementById('si_cnb_branch');
+        if (textInput) textInput.style.display = 'none';
+
+        settings.cnbBranch = this.value;
+        saveSettingsDebounced();
+        showToast(`✅ 已选择分支: ${this.value}`, 'success');
+    });
+
+    document.getElementById('si_cnb_branch')?.addEventListener('change', function () {
+        settings.cnbBranch = this.value.trim() || 'main';
+        saveSettingsDebounced();
+    });
+
+    document.getElementById('si_cnb_test_token')?.addEventListener('click', async function () {
+        this.disabled = true;
+        await cnbTestApiToken();
+        this.disabled = false;
     });
 
     document.getElementById('si_cnb_project_url')?.addEventListener('change', function () {
         settings.cnbProjectUrl = this.value.trim();
         saveSettingsDebounced();
-        showToast(`CNB项目URL已更新`, 'success');
+        showToast('CNB项目URL已更新', 'success');
     });
 
     document.getElementById('si_cnb_auto_wake')?.addEventListener('change', function () {
@@ -3263,34 +4547,168 @@ async function loadSettingsUI() {
         }
     });
 
-    document.getElementById('si_cnb_test_wake')?.addEventListener('click', async function () {
-        if (!settings.cnbProjectUrl) {
-            showToast('请先配置CNB项目URL', 'error');
-            return;
-        }
-        this.disabled = true;
-        const success = await cnbWakeService();
-        this.disabled = false;
-        if (success) {
-            showToast('✅ CNB ComfyUI服务唤醒成功!', 'success');
+    document.getElementById('si_cnb_auto_stop')?.addEventListener('change', function () {
+        settings.cnbAutoStop = !!this.checked;
+        saveSettingsDebounced();
+        const autoStopConfig = document.getElementById('si_cnb_auto_stop_config');
+        if (autoStopConfig) autoStopConfig.style.display = settings.cnbAutoStop ? 'block' : 'none';
+        if (settings.cnbAutoStop && settings.cnbEnabled) {
+            cnbResetAutoStopTimer();
+        } else {
+            cnbClearAutoStopTimer();
         }
     });
 
-    document.getElementById('si_cnb_check_status')?.addEventListener('click', async function () {
-        const comfyUrl = extension_settings.sd?.comfy_url || 'http://127.0.0.1:8188';
-        cnbUpdateStatusUI('checking', '正在检测...');
-        const status = await cnbCheckComfyStatus(comfyUrl);
-        if (status.online) {
-            cnbServiceState.status = 'online';
-            cnbServiceState.lastCheck = new Date().toISOString();
-            cnbServiceState.consecutiveFailures = 0;
-            cnbUpdateStatusUI('online', '服务在线');
-            showToast('✅ ComfyUI服务在线', 'success');
-        } else {
-            cnbServiceState.status = 'offline';
-            cnbUpdateStatusUI('offline', `服务离线 (${status.error || '无法连接'})`);
-            showToast(`❌ ComfyUI服务离线: ${status.error || '无法连接'}`, 'error');
+    document.getElementById('si_cnb_auto_stop_delay')?.addEventListener('input', function () {
+        const display = document.getElementById('si_cnb_auto_stop_delay_display');
+        if (display) display.textContent = `${this.value}分钟`;
+    });
+    document.getElementById('si_cnb_auto_stop_delay')?.addEventListener('change', function () {
+        settings.cnbAutoStopDelay = parseInt(this.value) || 30;
+        saveSettingsDebounced();
+        if (settings.cnbAutoStop && settings.cnbEnabled) {
+            cnbResetAutoStopTimer();
         }
+    });
+
+    document.getElementById('si_cnb_start_service')?.addEventListener('click', async function () {
+        const settings = getSettings();
+        if (!settings.cnbApiToken && !settings.cnbProjectUrl) {
+            showToast('请先配置CNB API Token和仓库路径，或CNB项目URL', 'error');
+            return;
+        }
+        await cnbAutoSetup();
+    });
+
+    document.getElementById('si_cnb_retry')?.addEventListener('click', async function () {
+        const retryStep = cnbSetupState.failedStep || 'validate';
+        await cnbAutoSetup(retryStep);
+    });
+
+    document.getElementById('si_cnb_stop_service')?.addEventListener('click', async function () {
+        this.disabled = true;
+        await cnbStopService();
+        this.disabled = false;
+    });
+
+    document.getElementById('si_cnb_check_status')?.addEventListener('click', async function () {
+        if (this.disabled) return;
+        this.disabled = true;
+        const checkBtn = this;
+        const origText = checkBtn.querySelector('.si-action-text')?.textContent || '';
+        const textEl = checkBtn.querySelector('.si-action-text');
+        if (textEl) textEl.textContent = '检测中...';
+
+        cnbUpdateStatusUI('checking', '正在检测服务状态...', {
+            progress: 10,
+            stageLabel: '初始化检测',
+        });
+
+        const settings = getSettings();
+        const comfyUrl = extension_settings.sd?.comfy_url || 'http://127.0.0.1:8188';
+        let wsDetail = null;
+        let comfyOnline = false;
+        let checkError = null;
+
+        const checkTimeout = setTimeout(() => {
+            cnbUpdateStatusUI('offline', '检测超时', {
+                progress: 0,
+                stageLabel: '超时',
+                detail: { error: '检测操作超时(30秒)，请检查网络连接和服务器状态' },
+            });
+            showToast('⚠️ 检测超时，请检查SillyTavern服务器是否正常运行', 'error');
+            if (textEl) textEl.textContent = origText;
+            checkBtn.disabled = false;
+        }, 30000);
+
+        try {
+            if (settings.cnbApiToken && settings.cnbRepoPath) {
+                cnbUpdateStatusUI('checking', '正在查询CNB工作空间状态...', {
+                    progress: 30,
+                    stageLabel: '查询工作空间',
+                });
+
+                try {
+                    const wsStatus = await cnbCheckWorkspaceStatus();
+                    if (wsStatus.running && wsStatus.workspace) {
+                        cnbServiceState.workspaceSn = wsStatus.workspace.sn;
+                        cnbServiceState.pipelineId = wsStatus.workspace.pipelineId;
+                        wsDetail = {
+                            workspaceSn: wsStatus.workspace.sn,
+                            branch: wsStatus.workspace.branch,
+                            duration: wsStatus.workspace.duration,
+                            comfyUrl: wsStatus.comfyProxyUrl || wsStatus.localTunnelUrl || '',
+                        };
+                    } else if (wsStatus.error) {
+                        wsDetail = { error: `CNB API查询失败: ${wsStatus.error}` };
+                    } else {
+                        wsDetail = { error: '没有运行中的工作空间' };
+                    }
+                } catch (e) {
+                    wsDetail = { error: `CNB API错误: ${e.message}` };
+                    console.warn('[Story-Images CNB] Workspace check failed:', e.message);
+                }
+            } else {
+                wsDetail = { error: 'CNB API Token或仓库路径未配置' };
+            }
+
+            cnbUpdateStatusUI('checking', '正在检测ComfyUI服务...', {
+                progress: 70,
+                stageLabel: '检测ComfyUI',
+                detail: wsDetail,
+            });
+
+            try {
+                const status = await cnbCheckComfyStatus(comfyUrl);
+                comfyOnline = status.online;
+                if (!status.online && status.error) {
+                    checkError = status.error;
+                }
+            } catch (e) {
+                comfyOnline = false;
+                checkError = e.message;
+                console.warn('[Story-Images CNB] ComfyUI check failed:', e.message);
+            }
+
+            if (comfyOnline) {
+                cnbServiceState.status = 'online';
+                cnbServiceState.lastCheck = new Date().toISOString();
+                cnbServiceState.consecutiveFailures = 0;
+
+                const comfyDetail = { ...wsDetail };
+                comfyDetail.comfyUrl = comfyUrl;
+                cnbUpdateStatusUI('online', '服务在线', {
+                    progress: 100,
+                    stageLabel: '检测完成',
+                    detail: comfyDetail,
+                });
+                showToast('✅ ComfyUI服务在线', 'success');
+            } else {
+                cnbServiceState.status = 'offline';
+                cnbServiceState.lastCheck = new Date().toISOString();
+
+                const offlineDetail = { ...wsDetail };
+                offlineDetail.error = offlineDetail.error || `ComfyUI无法连接 (${checkError || '超时'})`;
+                cnbUpdateStatusUI('offline', '服务离线', {
+                    progress: 0,
+                    stageLabel: '检测完成',
+                    detail: offlineDetail,
+                });
+                showToast('❌ ComfyUI服务离线', 'error');
+            }
+        } catch (e) {
+            console.error('[Story-Images CNB] Status check error:', e);
+            cnbUpdateStatusUI('offline', '检测失败', {
+                progress: 0,
+                stageLabel: '检测失败',
+                detail: { error: `检测过程出错: ${e.message}` },
+            });
+            showToast(`⚠️ 检测失败: ${e.message}`, 'error');
+        }
+
+        clearTimeout(checkTimeout);
+        if (textEl) textEl.textContent = origText;
+        this.disabled = false;
     });
 
     document.getElementById('si_expansion_method')?.addEventListener('change', function () {
@@ -3432,7 +4850,7 @@ async function loadSettingsUI() {
         if (statusEl) {
             if (success) {
                 const maskedKey = maskApiKey(settings.remoteApiKey);
-                statusEl.innerHTML = `<span style="color: #00c864;">✅ 连接成功</span> <span style="color: #888; font-size: 10px;">密钥: ${maskedKey}</span>`;
+                statusEl.innerHTML = `<span style="color: #00c864;">✅ 连接成功</span> <span style="color: #888; font-size: 10px;">密钥: ${escapeHtml(maskedKey)}</span>`;
             } else {
                 statusEl.innerHTML = '<span style="color: #ff5050;">❌ 连接失败</span>';
             }
@@ -3461,8 +4879,8 @@ async function loadSettingsUI() {
                 const name = (char.avatar_url || char.name || '').replace(/\.png$/, '');
                 if (!name) continue;
                 html += `<label style="display: flex; align-items: center; gap: 4px; margin: 2px 0; cursor: pointer;">
-                    <input type="checkbox" class="si-export-check" data-type="char" data-name="${name}" checked>
-                    <span style="color: #cbd5e1;">${name}</span>
+                    <input type="checkbox" class="si-export-check" data-type="char" data-name="${escapeHtml(name)}" checked>
+                    <span style="color: #cbd5e1;">${escapeHtml(name)}</span>
                 </label>`;
             }
         }
@@ -3472,8 +4890,8 @@ async function loadSettingsUI() {
                 const name = world.name || world.file_id || '';
                 if (!name) continue;
                 html += `<label style="display: flex; align-items: center; gap: 4px; margin: 2px 0; cursor: pointer;">
-                    <input type="checkbox" class="si-export-check" data-type="world" data-name="${name}" checked>
-                    <span style="color: #cbd5e1;">${name}</span>
+                    <input type="checkbox" class="si-export-check" data-type="world" data-name="${escapeHtml(name)}" checked>
+                    <span style="color: #cbd5e1;">${escapeHtml(name)}</span>
                 </label>`;
             }
         }
@@ -3646,26 +5064,26 @@ function updateModelStatus() {
     const source = sd.source || '未配置';
     const compat = checkModelCompatibility();
 
-    let html = `<div style="margin-bottom: 4px;"><strong>当前模型:</strong> <code style="color: #8cc8ff;">${model}</code></div>`;
-    html += `<div style="margin-bottom: 4px;"><strong>生成源:</strong> <span style="color: #aaa;">${source}</span></div>`;
+    let html = `<div style="margin-bottom: 4px;"><strong>当前模型:</strong> <code style="color: #8cc8ff;">${escapeHtml(model)}</code></div>`;
+    html += `<div style="margin-bottom: 4px;"><strong>生成源:</strong> <span style="color: #aaa;">${escapeHtml(source)}</span></div>`;
 
     if (compat.errors.length > 0) {
         const err = compat.errors[0];
         html += `<div style="padding: 6px; background: rgba(255,50,50,0.15); border: 1px solid rgba(255,50,50,0.3); border-radius: 4px; color: #ff5050;">`;
-        html += `<strong>❌ 不兼容: ${err.name}</strong><br>`;
+        html += `<strong>❌ 不兼容: ${escapeHtml(err.name)}</strong><br>`;
         for (const issue of err.issues) {
-            html += `• ${issue}<br>`;
+            html += `• ${escapeHtml(issue)}<br>`;
         }
-        html += `<span style="color: #ffaa00;">💡 ${err.suggestion}</span>`;
+        html += `<span style="color: #ffaa00;">💡 ${escapeHtml(err.suggestion)}</span>`;
         html += `</div>`;
     } else if (compat.warnings.length > 0) {
         const warn = compat.warnings[0];
         html += `<div style="padding: 6px; background: rgba(255,200,0,0.1); border: 1px solid rgba(255,200,0,0.3); border-radius: 4px; color: #ffc800;">`;
-        html += `<strong>⚠️ 警告: ${warn.name}</strong><br>`;
+        html += `<strong>⚠️ 警告: ${escapeHtml(warn.name)}</strong><br>`;
         for (const issue of warn.issues) {
-            html += `• ${issue}<br>`;
+            html += `• ${escapeHtml(issue)}<br>`;
         }
-        html += `<span style="color: #aaa;">💡 ${warn.suggestion}</span>`;
+        html += `<span style="color: #aaa;">💡 ${escapeHtml(warn.suggestion)}</span>`;
         html += `</div>`;
     } else {
         html += `<div style="padding: 4px; background: rgba(0,200,100,0.1); border-radius: 4px; color: #00c864;">✅ 模型兼容性检查通过</div>`;
@@ -3685,10 +5103,10 @@ function updateWorkflowInfo(workflowName) {
 
     const desc = WORKFLOW_DESCRIPTIONS[workflowName];
     if (desc) {
-        infoEl.innerHTML = `<strong>${desc.core}</strong><br><span style="color: #888;">${desc.advantage}</span>`;
+        infoEl.innerHTML = `<strong>${escapeHtml(desc.core)}</strong><br><span style="color: #888;">${escapeHtml(desc.advantage)}</span>`;
         infoEl.style.display = 'block';
     } else {
-        infoEl.innerHTML = `<span style="color: #888;">${workflowName}</span>`;
+        infoEl.innerHTML = `<span style="color: #888;">${escapeHtml(workflowName)}</span>`;
         infoEl.style.display = 'block';
     }
 }
@@ -4176,51 +5594,39 @@ async function generateAvatarImage() {
         if (!serviceReady) { showToast('❌ ComfyUI服务不可用', 'error'); return null; }
     }
     const styleConfig = getStyleConfig();
-    const savedFreeExtend = sd.free_extend;
-    const savedCommandVisible = sd.command_visible;
-    const savedPromptPrefix = sd.prompt_prefix;
-    const savedScale = sd.scale;
-    const savedSteps = sd.steps;
-    const savedSampler = sd.sampler;
-    const savedNegative = sd.negative_prompt;
-    const savedComfyWorkflow = sd.comfy_workflow;
-    const savedWidth = sd.width;
-    const savedHeight = sd.height;
-    sd.free_extend = false;
-    sd.command_visible = false;
-    sd.prompt_prefix = styleConfig.promptPrefix;
-    sd.scale = styleConfig.scale;
-    sd.steps = styleConfig.steps;
-    sd.sampler = styleConfig.sampler;
-    sd.width = 512;
-    sd.height = 768;
+    const sdOverrides = {
+        free_extend: false,
+        command_visible: false,
+        prompt_prefix: styleConfig.promptPrefix,
+        scale: styleConfig.scale,
+        steps: styleConfig.steps,
+        sampler: styleConfig.sampler,
+        width: 512,
+        height: 768,
+    };
     if (styleConfig.negativeExtra) {
-        const base = savedNegative || '';
-        if (!base.includes(styleConfig.negativeExtra.trim().substring(2))) sd.negative_prompt = base + styleConfig.negativeExtra;
+        const base = sd.negative_prompt || '';
+        if (!base.includes(styleConfig.negativeExtra.trim().substring(2))) sdOverrides.negative_prompt = base + styleConfig.negativeExtra;
     }
-    if (styleConfig.workflow && sd.source === 'comfy' && !settings.comfyWorkflow) sd.comfy_workflow = styleConfig.workflow;
-    else if (settings.comfyWorkflow && sd.source === 'comfy') sd.comfy_workflow = settings.comfyWorkflow;
-    try {
-        const trigger = 'portrait';
+    if (styleConfig.workflow && sd.source === 'comfy' && !settings.comfyWorkflow) sdOverrides.comfy_workflow = styleConfig.workflow;
+    else if (settings.comfyWorkflow && sd.source === 'comfy') sdOverrides.comfy_workflow = settings.comfyWorkflow;
+    return await withSdSettings(sdOverrides, async () => {
+        const trigger = sanitizedPrompt;
         const args = {};
         if (charInfo.existingNegative || styleConfig.negativeExtra) args.negative = (charInfo.existingNegative || '') + (styleConfig.negativeExtra || '');
-        const result = await globalThis.generatePicture('command', args, trigger);
-        sd.free_extend = savedFreeExtend; sd.command_visible = savedCommandVisible; sd.prompt_prefix = savedPromptPrefix;
-        sd.scale = savedScale; sd.steps = savedSteps; sd.sampler = savedSampler; sd.negative_prompt = savedNegative;
-        sd.comfy_workflow = savedComfyWorkflow; sd.width = savedWidth; sd.height = savedHeight;
-        if (result) {
-            showToast(`✅ ${charInfo.name} 头像生成成功!`, 'success');
-            showAvatarPreview(result, charInfo, sanitizedPrompt);
+        try {
+            const result = await globalThis.generatePicture('command', args, trigger);
+            if (result) {
+                showToast(`✅ ${charInfo.name} 头像生成成功!`, 'success');
+                showAvatarPreview(result, charInfo, sanitizedPrompt);
+            }
+            return result;
+        } catch (e) {
+            console.error('[Story-Images] Avatar generation error:', e);
+            showToast(`❌ 头像生成失败: ${e.message}`, 'error');
+            return null;
         }
-        return result;
-    } catch (e) {
-        sd.free_extend = savedFreeExtend; sd.command_visible = savedCommandVisible; sd.prompt_prefix = savedPromptPrefix;
-        sd.scale = savedScale; sd.steps = savedSteps; sd.sampler = savedSampler; sd.negative_prompt = savedNegative;
-        sd.comfy_workflow = savedComfyWorkflow; sd.width = savedWidth; sd.height = savedHeight;
-        console.error('[Story-Images] Avatar generation error:', e);
-        showToast(`❌ 头像生成失败: ${e.message}`, 'error');
-        return null;
-    }
+    });
 }
 
 function showAvatarPreview(imageData, charInfo, prompt) {
@@ -4240,10 +5646,10 @@ function showAvatarPreview(imageData, charInfo, prompt) {
         imgSrc = '/' + imageData.replace(/^\/+/, '');
     }
     card.innerHTML = `
-        <h3 style="margin:0 0 12px;color:#e2e8f0;">🎨 ${charInfo.name} 头像预览</h3>
-        <img src="${imgSrc}" style="max-width:256px;max-height:384px;border-radius:8px;border:2px solid #4a9eff;margin-bottom:12px;" />
+        <h3 style="margin:0 0 12px;color:#e2e8f0;">🎨 ${escapeHtml(charInfo.name)} 头像预览</h3>
+        <img src="${escapeHtml(imgSrc)}" style="max-width:256px;max-height:384px;border-radius:8px;border:2px solid #4a9eff;margin-bottom:12px;" />
         <div style="font-size:11px;color:#888;margin-bottom:8px;max-height:60px;overflow-y:auto;text-align:left;padding:6px;background:rgba(0,0,0,0.3);border-radius:4px;">
-            <strong>提示词:</strong> ${prompt.substring(0, 300)}${prompt.length > 300 ? '...' : ''}
+            <strong>提示词:</strong> ${escapeHtml(prompt.substring(0, 300))}${prompt.length > 300 ? '...' : ''}
         </div>
         <div id="si_consistency_info" style="font-size:11px;margin-bottom:12px;text-align:left;padding:6px;background:rgba(0,0,0,0.2);border-radius:4px;color:#aaa;">
             正在评估一致性...
@@ -4271,7 +5677,7 @@ function showAvatarPreview(imageData, charInfo, prompt) {
         const infoEl = document.getElementById('si_consistency_info');
         if (infoEl) {
             const color = assessment.score >= 80 ? '#00c864' : assessment.score >= 50 ? '#ffc800' : '#ff5050';
-            infoEl.innerHTML = `<span style="color:${color};font-weight:bold;">一致性: ${assessment.score}%</span> | ${assessment.details}`;
+            infoEl.innerHTML = `<span style="color:${color};font-weight:bold;">一致性: ${assessment.score}%</span> | ${escapeHtml(assessment.details)}`;
         }
     }, 100);
 }
@@ -4402,7 +5808,7 @@ SI_REGEN_CSS.textContent = `
         background: rgba(74,158,255,0.18) !important;
     }
     #si_top_nav_content {
-        min-width: 450px;
+        min-width: min(450px, 90vw);
     }
     #si_top_nav_icon.openIcon {
         color: #4a9eff;
@@ -4460,6 +5866,12 @@ function toggleTopNavIcon(show) {
     }
 }
 jQuery(async () => {
+    if (extension_settings['story-images'] && !extension_settings[EXT_NAME]) {
+        extension_settings[EXT_NAME] = extension_settings['story-images'];
+        delete extension_settings['story-images'];
+        saveSettingsDebounced();
+        console.log('[Story-Images] Migrated settings from old key "story-images" to "sillytavern-image-assistant"');
+    }
     const settings = getSettings();
     initDefaultCharacterPrompts();
     registerSlashCommands();
@@ -4539,6 +5951,10 @@ jQuery(async () => {
     toggleTopNavIcon(settings.showTopNavIcon);
 
     await loadSettingsUI();
+
+    if (settings.cnbApiToken) {
+        setTimeout(() => cnbFetchRepos(), 500);
+    }
 
     setTimeout(() => scanAllVisibleMessages(), 1500);
 

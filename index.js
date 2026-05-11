@@ -1049,13 +1049,18 @@ async function cnbAutoSetup(retryFromStep) {
         return false;
     }
 
-    if (!settings.cnbApiToken) {
-        showToast('⚠️ 请先填写CNB API Token', 'error');
+    if (!settings.cnbApiToken && !settings.cnbProjectUrl) {
+        showToast('⚠️ 请先配置CNB API Token和仓库路径，或CNB项目URL', 'error');
         return false;
     }
 
-    if (!settings.cnbRepoPath && !settings.cnbProjectUrl) {
-        showToast('⚠️ 请先配置仓库路径或CNB项目URL', 'error');
+    if (!settings.cnbApiToken && settings.cnbProjectUrl) {
+        showToast('⚠️ 传统URL模式不支持一键启动，请配置API Token', 'error');
+        return false;
+    }
+
+    if (!settings.cnbRepoPath) {
+        showToast('⚠️ 请先配置仓库路径（格式：组织名/仓库名）', 'error');
         return false;
     }
 
@@ -1154,7 +1159,9 @@ async function cnbAutoSetup(retryFromStep) {
         if (startFrom <= 2) {
             const wsStatus2 = await cnbCheckWorkspaceStatus();
             if (wsStatus2.running) {
-                cnbSetupUpdateStep('wait', 'done', '环境已就绪');
+                if (!document.querySelector('.si-setup-step[data-step="wait"]')?.classList.contains('si-step-skipped')) {
+                    cnbSetupUpdateStep('wait', 'done', '环境已就绪');
+                }
             } else {
                 cnbSetupUpdateStep('wait', 'active', '等待环境构建和启动...');
                 cnbSetupLog('info', '等待Workspace构建和服务启动...');
@@ -1332,7 +1339,10 @@ async function cnbAutoSetup(retryFromStep) {
         return true;
 
     } catch (err) {
-        const step = err.step || 'unknown';
+        const step = err.step || CNB_SETUP_STEPS.find(s => {
+            const el = document.querySelector(`.si-setup-step[data-step="${s}"]`);
+            return el && (el.classList.contains('si-step-active') || !el.classList.contains('si-step-done'));
+        }) || 'validate';
         const message = err.message || String(err);
         const hint = err.hint || '';
 
@@ -3738,10 +3748,10 @@ async function testComfyConnectionCommand() {
 async function cnbWakeCommand() {
     const settings = getSettings();
     if (!settings.cnbEnabled) {
-        return 'CNB自动唤醒未启用，请在设置中开启';
+        return 'CNB服务管理未启用，请在设置中开启';
     }
-    if (!settings.cnbProjectUrl) {
-        return 'CNB项目URL未配置，请在设置中填写';
+    if (!settings.cnbApiToken || !settings.cnbRepoPath) {
+        return 'CNB API Token或仓库路径未配置，请先在设置中填写';
     }
 
     showToast('正在启动CNB ComfyUI服务...', 'info');
@@ -4641,8 +4651,10 @@ async function loadSettingsUI() {
                         };
                     } else if (wsStatus.error) {
                         wsDetail = { error: `CNB API查询失败: ${wsStatus.error}` };
+                    } else if (wsStatus.running === false) {
+                        wsDetail = { error: '没有运行中的工作空间，请点击一键启动' };
                     } else {
-                        wsDetail = { error: '没有运行中的工作空间' };
+                        wsDetail = { error: '无法获取工作空间状态' };
                     }
                 } catch (e) {
                     wsDetail = { error: `CNB API错误: ${e.message}` };

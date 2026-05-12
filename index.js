@@ -4363,7 +4363,7 @@ async function loadSettingsUI() {
 
     container.innerHTML = `
         <div class="story-images-settings">
-            <h4>📷 图片功能辅助 v1.0</h4>
+            <h4>📷 图片功能辅助 v2.1</h4>
             <div style="margin: 8px 0; padding: 8px; background: rgba(74,158,255,0.1); border-radius: 4px; font-size: 12px;">
                 <strong>可用指令：</strong><br>
                 <code>/init-story [场景]</code> - 初始化故事画像<br>
@@ -6349,5 +6349,5 @@ jQuery(async () => {
 
     setTimeout(() => scanAllVisibleMessages(), 1500);
 
-    console.log('[Story-Images] 图片功能辅助 v1.0 - Regenerate + Top Nav Panel + Avatar Gen + Auto Style + CNB Auto-Wake + Remote API + Ollama + ST LLM + Model Compat + Choice Buttons');
+    console.log('[Story-Images] 图片功能辅助 v2.1 - Regenerate + Top Nav Panel + Avatar Gen + Auto Style + CNB Auto-Wake + Remote API + Ollama + ST LLM + Model Compat + Choice Buttons + CORS Proxy');
 });

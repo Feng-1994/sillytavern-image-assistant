@@ -14,16 +14,27 @@ SillyTavern 扩展插件 - 为角色扮演提供智能图片生成辅助功能�
 - ☁️ **CNB ComfyUI 一键启动** - 全新自动化流程，从Token验证到连接测试全程自动化
 - 🎯 **选择按钮** - 在聊天中提供交互式选择按钮
 
-## 🚀 v2.0 重大更新
+## 🚀 v2.1 重大更新
 
-### ☁️ CNB ComfyUI 一键启动（全新功能）
+### 🎯 安装即用，无需额外配置
 
-全新的6步自动化流程，从输入Token到完成连接测试全程无需手动干预：
+扩展安装后即可直接使用所有基础CNB功能（Token验证、仓库管理、工作空间控制），无需运行安装脚本或手动配置后端插件。
+
+**工作原理：** 扩展自动利用 SillyTavern 内置的 CORS 代理（`enableCorsProxy`，默认开启）通过 `X-Target-Authorization` 头安全地转发 CNB API Token，实现浏览器端直接调用 CNB API。
+
+**API调用优先级：**
+1. **Server Plugin**（如已安装）→ 直接使用 `/api/plugins/` 路由
+2. **CORS Proxy**（默认可用）→ 通过 `/proxy/` + `X-Target-Authorization` 头
+3. **提示启用** → 显示 config.yaml 配置指引
+
+### ☁️ CNB ComfyUI 一键启动
+
+6步自动化流程，从输入Token到完成连接测试全程无需手动干预：
 
 1. **验证API Token和仓库** - 自动检查Token有效性和仓库可访问性
 2. **启动云开发环境** - 自动创建并启动CNB Workspace
 3. **等待环境就绪** - 实时监控构建状态，动态更新进度
-4. **建立SSH隧道** - 自动创建本地端口转发，获取稳定访问地址
+4. **建立SSH隧道** - 自动创建本地端口转发，获取稳定访问地址（需Server Plugin）
 5. **同步ComfyUI URL** - 自动提取访问地址并填入图像生成模块
 6. **连接测试** - 验证ComfyUI服务可用性和响应状态
 
@@ -41,13 +52,6 @@ SillyTavern 扩展插件 - 为角色扮演提供智能图片生成辅助功能�
 - 🔄 重试按钮：从失败步骤重新开始，跳过已完成步骤
 - 详细流程日志，便于问题诊断
 
-### 🔧 关键Bug修复
-
-- 修复CNB API调用缺少CSRF Token导致POST请求403 Forbidden的问题
-- 修复`cnbCheckWorkspaceStatus`未返回`localTunnelUrl`导致SSH隧道无法复用的问题
-- 修复`cnbUpdateStatusUI`中`settings`未定义导致状态更新崩溃的问题
-- 修复后端隧道查找键不一致导致workspace-status无法返回隧道URL的问题
-
 ## 📦 安装方法
 
 1. 打开 SillyTavern
@@ -59,6 +63,8 @@ SillyTavern 扩展插件 - 为角色扮演提供智能图片生成辅助功能�
    ```
 5. 点击安装，等待完成
 6. 刷新页面即可使用
+
+> 💡 **安装即用：** 扩展安装后可直接使用所有CNB基础功能（Token验证、仓库管理、工作空间控制），无需额外配置。
 
 ## ⚙️ 配置说明
 
@@ -77,6 +83,22 @@ SillyTavern 扩展插件 - 为角色扮演提供智能图片生成辅助功能�
 3. 点击 🚀 **一键启动** 按钮，自动完成全部流程
 4. 流程完成后ComfyUI URL自动填入图像生成模块
 
+### 🔧 可选：安装Server Plugin（SSH隧道功能）
+
+SSH隧道等服务器端操作需要安装Server Plugin：
+
+**自动安装：**
+```bash
+node public/scripts/extensions/third-party/sillytavern-image-assistant/install.mjs
+```
+
+**手动安装：**
+1. 将扩展目录中的 `server-plugin/` 文件夹复制到 SillyTavern 的 `plugins/sillytavern-image-assistant/`
+2. 在 `config.yaml` 中设置 `enableServerPlugins: true`
+3. 重启 SillyTavern
+
+> 💡 不安装Server Plugin不影响基础CNB功能的使用（Token验证、仓库管理、工作空间控制均可通过CORS代理正常使用）。
+
 ### 顶部导航栏图标
 
 勾选"显示顶部导航栏图标"后，在顶部导航栏出现📷图标，点击即可打开与聊天框等宽的完整设置面板，无需在侧边栏滚动查找。
@@ -93,9 +115,21 @@ SillyTavern 扩展插件 - 为角色扮演提供智能图片生成辅助功能�
   - SillyTavern 内置 LLM
 - CNB平台（可选，用于云ComfyUI）:
   - [CNB](https://cnb.cool) 账号和访问令牌
-  - SSH客户端（用于隧道连接）
+  - SSH客户端（用于隧道连接，需安装Server Plugin）
 
 ## 📝 版本历史
+
+### v2.1.0
+
+**🎯 安装即用 - 无需额外配置**
+
+- ✨ 新增CORS代理模式：利用SillyTavern内置CORS代理 + `X-Target-Authorization`头安全转发CNB API Token
+- ✨ 安装扩展后即可直接使用CNB基础功能，无需运行安装脚本
+- ✨ Server Plugin降级为可选增强（仅SSH隧道等服务器端操作需要）
+- 🔧 修复CORS代理查询参数丢失问题
+- 🔧 修复"Unexpected token '<', \"<!DOCTYPE \"... is not valid JSON"错误
+- 🔧 修复API Key输入框XSS防护不一致问题
+- 🔧 优化错误提示：区分"CORS代理未启用"和"需要Server Plugin"两种场景
 
 ### v2.0.0
 

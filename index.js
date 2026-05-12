@@ -423,13 +423,114 @@ async function cnbCheckWorkspaceStatus() {
     }
 }
 
-async function cnbApiCall(endpoint, options = {}) {
+const CNB_API_BASE = 'https://api.cnb.cool';
+
+let _cnbPluginAvailable = null;
+let _cnbCorsProxyAvailable = null;
+
+function encodeRepoPath(repo) {
+    return repo.split('/').map(segment => encodeURIComponent(segment)).join('/');
+}
+
+async function cnbCheckCorsProxyAvailable() {
+    if (_cnbCorsProxyAvailable !== null) return _cnbCorsProxyAvailable;
     try {
+        const response = await fetch('/proxy/https://api.cnb.cool/', {
+            method: 'GET',
+            headers: { ...getRequestHeaders(), 'X-Target-Authorization': 'Bearer test' },
+        });
+        _cnbCorsProxyAvailable = response.status !== 404;
+    } catch {
+        _cnbCorsProxyAvailable = false;
+    }
+    return _cnbCorsProxyAvailable;
+}
+
+async function cnbCheckPluginAvailable() {
+    if (_cnbPluginAvailable !== null) return _cnbPluginAvailable;
+    try {
+        const response = await fetch('/api/plugins/sillytavern-image-assistant/test-token', {
+            method: 'GET',
+            headers: getRequestHeaders(),
+        });
+        const text = await response.text();
+        if (text.startsWith('<!') || text.startsWith('<html') || text.startsWith('<HTML')) {
+            _cnbPluginAvailable = false;
+        } else {
+            _cnbPluginAvailable = response.ok || response.status === 400;
+        }
+    } catch {
+        _cnbPluginAvailable = false;
+    }
+    return _cnbPluginAvailable;
+}
+
+async function cnbFetchViaCorsProxy(apiPath, options = {}) {
+    const settings = getSettings();
+    const token = settings.cnbApiToken;
+    if (!token) throw new Error('CNB API Token未配置');
+
+    const fullUrl = `${CNB_API_BASE}${apiPath}`;
+    const controller = new AbortController();
+    const timeoutMs = options.timeout || 15000;
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+        const headers = {
+            ...getRequestHeaders(),
+            'X-Target-Authorization': `Bearer ${token}`,
+            'Accept': 'application/json',
+        };
+        delete headers['Authorization'];
+        delete headers['authorization'];
+
+        if (options.method && !['GET', 'HEAD'].includes(options.method)) {
+            headers['Content-Type'] = 'application/json';
+        }
+
+        const response = await fetch(`/proxy/${fullUrl}`, {
+            method: options.method || 'GET',
+            headers,
+            body: options.body ? JSON.stringify(options.body) : undefined,
+            signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+
+        const text = await response.text();
+        let data;
+        try {
+            data = JSON.parse(text);
+        } catch {
+            if (text.startsWith('<!') || text.startsWith('<html') || text.startsWith('<HTML')) {
+                _cnbCorsProxyAvailable = false;
+                throw new Error('CORS_PROXY_ERROR');
+            }
+            throw new Error(`CNB API响应不是有效的JSON格式 (${response.status})`);
+        }
+        if (!response.ok) {
+            throw new Error(data.message || data.error || `CNB API错误 (${response.status})`);
+        }
+        return data;
+    } catch (e) {
+        clearTimeout(timeoutId);
+        if (e.name === 'AbortError') {
+            throw new Error('请求超时');
+        }
+        throw e;
+    }
+}
+
+async function cnbProxyApiCall(endpoint, options = {}) {
+    const settings = getSettings();
+    const token = settings.cnbApiToken;
+    if (!token) throw new Error('CNB API Token未配置');
+
+    if (await cnbCheckPluginAvailable()) {
         const controller = new AbortController();
         const timeoutMs = options.timeout || 15000;
         const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-        const response = await fetch(`/api/cnb${endpoint}`, {
+        const response = await fetch(`/api/plugins/sillytavern-image-assistant${endpoint}`, {
             method: options.method || 'GET',
             headers: getRequestHeaders(),
             body: options.body ? JSON.stringify(options.body) : undefined,
@@ -437,12 +538,290 @@ async function cnbApiCall(endpoint, options = {}) {
         });
         clearTimeout(timeoutId);
 
-        const data = await response.json();
+        const text = await response.text();
+        let data;
+        try {
+            data = JSON.parse(text);
+        } catch {
+            if (text.startsWith('<!') || text.startsWith('<html') || text.startsWith('<HTML')) {
+                _cnbPluginAvailable = false;
+                return cnbProxyApiCall(endpoint, options);
+            }
+            throw new Error(`API响应不是有效的JSON格式 (${response.status})`);
+        }
         if (!response.ok) {
             throw new Error(data.error || data.message || `API错误 (${response.status})`);
         }
         return data;
+    }
+
+    const apiMapping = cnbGetEndpointMapping(endpoint, options, settings);
+    if (!apiMapping) {
+        cnbShowPluginRequiredGuide();
+        throw new Error('此功能需要安装CNB后端插件（SSH隧道等服务器端操作无法在浏览器中执行）');
+    }
+
+    if (await cnbCheckCorsProxyAvailable()) {
+        const rawData = await cnbFetchViaCorsProxy(apiMapping.path, {
+            method: apiMapping.method || options.method,
+            body: apiMapping.body || options.body,
+            timeout: options.timeout,
+        });
+        return apiMapping.transform ? apiMapping.transform(rawData) : rawData;
+    }
+
+    cnbShowCorsProxyGuide();
+    throw new Error('CORS代理未启用。请在config.yaml中设置 enableCorsProxy: true 后重启SillyTavern');
+}
+
+function cnbGetEndpointMapping(endpoint, options, settings) {
+    if (endpoint === '/test-token') {
+        return {
+            path: '/user',
+            method: 'GET',
+            transform: (data) => ({
+                valid: true,
+                status: 200,
+                message: 'Token验证成功',
+                username: data.username || null,
+                nickname: data.nickname || null,
+            }),
+        };
+    }
+
+    if (endpoint.startsWith('/validate-repo')) {
+        const repo = new URLSearchParams(endpoint.split('?')[1] || '').get('repo');
+        if (!repo) return null;
+        const validation = cnbValidateRepoPath(repo);
+        if (!validation.valid) {
+            return {
+                path: `/${encodeRepoPath(validation.normalized || repo)}`,
+                method: 'GET',
+                transform: () => ({
+                    valid: false,
+                    exists: false,
+                    error: validation.error,
+                }),
+            };
+        }
+        return {
+            path: `/${encodeRepoPath(validation.normalized)}`,
+            method: 'GET',
+            transform: (data) => ({
+                valid: true,
+                exists: true,
+                path: data.path,
+                name: data.name,
+                description: (data.description || '').substring(0, 100),
+                defaultBranch: data.default_branch || 'main',
+                webUrl: data.web_url,
+            }),
+        };
+    }
+
+    if (endpoint.startsWith('/repos')) {
+        const params = new URLSearchParams(endpoint.split('?')[1] || '');
+        const page = params.get('page') || '1';
+        const pageSize = params.get('page_size') || '50';
+        return {
+            path: `/user/repos?page=${page}&page_size=${pageSize}`,
+            method: 'GET',
+            transform: (data) => {
+                const repos = Array.isArray(data) ? data : (data?.list || []);
+                return {
+                    repos: repos.map(r => ({
+                        path: r.path || r.full_path || r.path_with_namespace || `${r.namespace?.path || ''}/${r.name}`,
+                        name: r.name,
+                        description: r.description || '',
+                        defaultBranch: r.default_branch || 'main',
+                        visibility: r.visibility_level || r.visibility || '',
+                        updatedAt: r.updated_at || '',
+                    })),
+                    total: data?.total || repos.length,
+                };
+            },
+        };
+    }
+
+    if (endpoint.startsWith('/branches')) {
+        const params = new URLSearchParams(endpoint.split('?')[1] || '');
+        const repo = params.get('repo');
+        if (!repo) return null;
+        const page = params.get('page') || '1';
+        const pageSize = params.get('page_size') || '50';
+        return {
+            path: `/${encodeRepoPath(repo)}/-/git/branches?page=${page}&page_size=${pageSize}`,
+            method: 'GET',
+            transform: (data) => {
+                const branches = Array.isArray(data) ? data : (data?.list || []);
+                return {
+                    branches: branches.map(b => ({
+                        name: b.name,
+                        isDefault: b.is_default || false,
+                        updatedAt: b.commit?.committed_date || b.updated_at || '',
+                    })),
+                };
+            },
+        };
+    }
+
+    if (endpoint.startsWith('/workspace-status')) {
+        const params = new URLSearchParams(endpoint.split('?')[1] || '');
+        const repo = params.get('repo');
+        if (!repo) return null;
+        const validation = cnbValidateRepoPath(repo);
+        if (!validation.valid) return null;
+        return {
+            path: `/workspace/list?slug=${encodeURIComponent(validation.normalized)}&page=1&page_size=10`,
+            method: 'GET',
+            transform: (data) => {
+                const workspaces = Array.isArray(data) ? data : (data?.list || []);
+                const ws = workspaces.find(w => w.status?.toLowerCase() === 'running') || null;
+                if (!ws) {
+                    return { status: 'offline', workspace: null, comfyProxyUrl: null, localTunnelUrl: null };
+                }
+                return {
+                    status: ws.status?.toLowerCase() || 'unknown',
+                    workspace: {
+                        sn: ws.sn,
+                        pipelineId: ws.pipeline_id,
+                        branch: ws.branch,
+                        createTime: ws.create_time,
+                        duration: ws.duration,
+                        repoUrl: ws.repo_url,
+                    },
+                    detail: null,
+                    comfyProxyUrl: null,
+                    localTunnelUrl: null,
+                };
+            },
+        };
+    }
+
+    if (endpoint === '/start' && options.method === 'POST') {
+        const repo = options.body?.repo || settings.cnbRepoPath;
+        if (!repo) return null;
+        const validation = cnbValidateRepoPath(repo);
+        if (!validation.valid) return null;
+        return {
+            path: `/${encodeRepoPath(validation.normalized)}/-/workspace/start`,
+            method: 'POST',
+            body: { branch: options.body?.branch || settings.cnbBranch || 'main' },
+            timeout: 60000,
+        };
+    }
+
+    if (endpoint === '/stop' && options.method === 'POST') {
+        return {
+            path: '/workspace/stop',
+            method: 'POST',
+            body: options.body,
+        };
+    }
+
+    if (endpoint === '/delete' && options.method === 'POST') {
+        return {
+            path: '/workspace/delete',
+            method: 'POST',
+            body: options.body,
+        };
+    }
+
+    if (endpoint.startsWith('/list')) {
+        const params = new URLSearchParams(endpoint.split('?')[1] || '');
+        const qs = params.toString();
+        return {
+            path: `/workspace/list${qs ? '?' + qs : ''}`,
+            method: 'GET',
+        };
+    }
+
+    if (endpoint.startsWith('/build-status')) {
+        const parts = endpoint.replace('/build-status/', '').split('/');
+        if (parts.length < 2) return null;
+        const repo = decodeURIComponent(parts[0]);
+        const sn = parts[1];
+        return {
+            path: `/${encodeRepoPath(repo)}/-/build/status/${sn}`,
+            method: 'GET',
+        };
+    }
+
+    if (endpoint.startsWith('/setup-tunnel') || endpoint.startsWith('/ssh-status') || endpoint.startsWith('/setup-ssh') || endpoint.startsWith('/comfyui-proxy')) {
+        return null;
+    }
+
+    if (endpoint.startsWith('/tunnel')) {
+        return null;
+    }
+
+    return null;
+}
+
+function cnbValidateRepoPath(repo) {
+    if (!repo || typeof repo !== 'string') return { valid: false, error: '仓库路径为空' };
+    const trimmed = repo.trim();
+    if (trimmed !== repo) return { valid: false, error: '仓库路径包含前后空格', normalized: trimmed };
+    const parts = trimmed.split('/');
+    if (parts.length < 2) return { valid: false, error: '仓库路径格式错误，应为: 组织名/仓库名' };
+    if (/[:\s]/.test(trimmed)) return { valid: false, error: '仓库路径包含非法字符（冒号或空格），请确认路径是否正确' };
+    return { valid: true, normalized: trimmed };
+}
+
+function cnbShowCorsProxyGuide() {
+    const statusEl = document.getElementById('si_cnb_status');
+    if (statusEl) {
+        statusEl.innerHTML = `
+            <div style="color: #ff8080; font-size: 11px;">
+                <div style="font-weight: bold; margin-bottom: 4px;">⚠️ CORS代理未启用</div>
+                <div style="color: #aaa; margin-bottom: 6px;">CNB功能需要CORS代理支持，请按以下步骤启用：</div>
+                <div style="color: #ccc; font-family: monospace; font-size: 10px; background: rgba(0,0,0,0.3); padding: 6px; border-radius: 4px; margin-bottom: 6px;">
+                    在 SillyTavern 的 <b>config.yaml</b> 中设置：<br>
+                    &nbsp;&nbsp;&nbsp;<code style="color: #7fff7f;">enableCorsProxy: true</code><br><br>
+                    然后重启 SillyTavern
+                </div>
+            </div>
+        `;
+    }
+}
+
+function cnbShowPluginRequiredGuide() {
+    const statusEl = document.getElementById('si_cnb_status');
+    if (statusEl) {
+        statusEl.innerHTML = `
+            <div style="color: #ff8080; font-size: 11px;">
+                <div style="font-weight: bold; margin-bottom: 4px;">⚠️ 此功能需要CNB后端插件</div>
+                <div style="color: #aaa; margin-bottom: 6px;">SSH隧道等服务器端操作需要Server Plugin支持：</div>
+                <div style="color: #ccc; font-family: monospace; font-size: 10px; background: rgba(0,0,0,0.3); padding: 6px; border-radius: 4px; margin-bottom: 6px;">
+                    <b>自动安装（推荐）</b><br>
+                    &nbsp;&nbsp;&nbsp;在SillyTavern目录下运行：<br>
+                    &nbsp;&nbsp;&nbsp;<code style="color: #7fff7f;">node public/scripts/extensions/third-party/sillytavern-image-assistant/install.mjs</code><br><br>
+                    <b>手动安装</b><br>
+                    &nbsp;&nbsp;&nbsp;1. 将扩展目录中的 <b>server-plugin/</b> 文件夹<br>
+                    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;复制到 SillyTavern 的 <b>plugins/sillytavern-image-assistant/</b><br><br>
+                    &nbsp;&nbsp;&nbsp;2. 在 <b>config.yaml</b> 中设置：<br>
+                    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<code>enableServerPlugins: true</code><br><br>
+                    &nbsp;&nbsp;&nbsp;3. 重启 SillyTavern
+                </div>
+                <div style="color: #888; font-size: 10px;">安装后端插件后可使用SSH隧道等完整功能</div>
+            </div>
+        `;
+    }
+}
+
+async function cnbApiCall(endpoint, options = {}) {
+    try {
+        return await cnbProxyApiCall(endpoint, options);
     } catch (e) {
+        if (e.message === 'CORS_PROXY_ERROR') {
+            _cnbCorsProxyAvailable = null;
+            try {
+                return await cnbProxyApiCall(endpoint, options);
+            } catch (retryErr) {
+                console.error(`[Story-Images CNB] API call failed after retry: ${endpoint}`, retryErr);
+                throw retryErr;
+            }
+        }
         console.error(`[Story-Images CNB] API call failed: ${endpoint}`, e);
         throw e;
     }
@@ -4185,7 +4564,7 @@ async function loadSettingsUI() {
                 <label style="display:block; margin: 4px 0;">
                     API密钥:
                     <div style="display: flex; gap: 4px; margin-top: 2px;">
-                        <input type="password" id="si_remote_api_key" value="${settings.remoteApiKey || ''}" placeholder="sk-..." style="flex: 1;">
+                        <input type="password" id="si_remote_api_key" value="${escapeHtml(settings.remoteApiKey || '')}" placeholder="sk-..." style="flex: 1;">
                         <button id="si_toggle_api_key" class="si-action-btn si-action-icon-only" title="显示/隐藏密钥"><span class="si-action-icon">👁️</span></button>
                     </div>
                     <div style="font-size: 10px; color: #666; margin-top: 2px;">密钥仅存储在本地浏览器中，不会上传至任何第三方服务器</div>

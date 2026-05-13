@@ -427,9 +427,65 @@ const CNB_API_BASE = 'https://api.cnb.cool';
 
 let _cnbPluginAvailable = null;
 let _cnbCorsProxyAvailable = null;
+let _cnbCorsAuthMode = null;
 
 function encodeRepoPath(repo) {
     return repo.split('/').map(segment => encodeURIComponent(segment)).join('/');
+}
+
+async function cnbDetectCorsAuthMode() {
+    if (_cnbCorsAuthMode !== null) return _cnbCorsAuthMode;
+    const settings = getSettings();
+    const token = settings.cnbApiToken;
+    if (!token) return null;
+
+    try {
+        const headers = {
+            ...getRequestHeaders(),
+            'Authorization': `Bearer ${token}`,
+            'Accept': 'application/json',
+        };
+        const response = await fetch('/proxy/https://api.cnb.cool/user', {
+            method: 'GET',
+            headers,
+        });
+        if (response.ok) {
+            const text = await response.text();
+            try {
+                const data = JSON.parse(text);
+                if (data.username || data.id) {
+                    _cnbCorsAuthMode = 'direct';
+                    return 'direct';
+                }
+            } catch {}
+        }
+    } catch {}
+
+    try {
+        const headers = {
+            ...getRequestHeaders(),
+            'X-Target-Authorization': `Bearer ${token}`,
+            'Accept': 'application/json',
+        };
+        delete headers['Authorization'];
+        delete headers['authorization'];
+        const response = await fetch('/proxy/https://api.cnb.cool/user', {
+            method: 'GET',
+            headers,
+        });
+        if (response.ok) {
+            const text = await response.text();
+            try {
+                const data = JSON.parse(text);
+                if (data.username || data.id) {
+                    _cnbCorsAuthMode = 'x-target';
+                    return 'x-target';
+                }
+            } catch {}
+        }
+    } catch {}
+
+    return null;
 }
 
 async function cnbCheckCorsProxyAvailable() {
@@ -437,7 +493,7 @@ async function cnbCheckCorsProxyAvailable() {
     try {
         const response = await fetch('/proxy/https://api.cnb.cool/', {
             method: 'GET',
-            headers: { ...getRequestHeaders(), 'X-Target-Authorization': 'Bearer test' },
+            headers: { ...getRequestHeaders() },
         });
         _cnbCorsProxyAvailable = response.status !== 404;
     } catch {
@@ -470,6 +526,8 @@ async function cnbFetchViaCorsProxy(apiPath, options = {}) {
     const token = settings.cnbApiToken;
     if (!token) throw new Error('CNB API Token未配置');
 
+    const authMode = await cnbDetectCorsAuthMode();
+
     const fullUrl = `${CNB_API_BASE}${apiPath}`;
     const controller = new AbortController();
     const timeoutMs = options.timeout || 15000;
@@ -478,11 +536,16 @@ async function cnbFetchViaCorsProxy(apiPath, options = {}) {
     try {
         const headers = {
             ...getRequestHeaders(),
-            'X-Target-Authorization': `Bearer ${token}`,
             'Accept': 'application/json',
         };
-        delete headers['Authorization'];
-        delete headers['authorization'];
+
+        if (authMode === 'direct') {
+            headers['Authorization'] = `Bearer ${token}`;
+        } else {
+            delete headers['Authorization'];
+            delete headers['authorization'];
+            headers['X-Target-Authorization'] = `Bearer ${token}`;
+        }
 
         if (options.method && !['GET', 'HEAD'].includes(options.method)) {
             headers['Content-Type'] = 'application/json';
@@ -571,7 +634,7 @@ async function cnbProxyApiCall(endpoint, options = {}) {
     }
 
     cnbShowCorsProxyGuide();
-    throw new Error('CORS代理未启用。请在config.yaml中设置 enableCorsProxy: true 后重启SillyTavern');
+    throw new Error('CORS代理未启用或认证模式不兼容。请在config.yaml中设置 enableCorsProxy: true 后重启SillyTavern。如已启用仍失败，请运行安装脚本: node public/scripts/extensions/third-party/sillytavern-image-assistant/install.mjs');
 }
 
 function cnbGetEndpointMapping(endpoint, options, settings) {
@@ -815,6 +878,7 @@ async function cnbApiCall(endpoint, options = {}) {
     } catch (e) {
         if (e.message === 'CORS_PROXY_ERROR') {
             _cnbCorsProxyAvailable = null;
+            _cnbCorsAuthMode = null;
             try {
                 return await cnbProxyApiCall(endpoint, options);
             } catch (retryErr) {
@@ -4363,7 +4427,7 @@ async function loadSettingsUI() {
 
     container.innerHTML = `
         <div class="story-images-settings">
-            <h4>📷 图片功能辅助 v2.1</h4>
+            <h4>📷 图片功能辅助 v2.2</h4>
             <div style="margin: 8px 0; padding: 8px; background: rgba(74,158,255,0.1); border-radius: 4px; font-size: 12px;">
                 <strong>可用指令：</strong><br>
                 <code>/init-story [场景]</code> - 初始化故事画像<br>
@@ -6349,5 +6413,5 @@ jQuery(async () => {
 
     setTimeout(() => scanAllVisibleMessages(), 1500);
 
-    console.log('[Story-Images] 图片功能辅助 v2.1 - Regenerate + Top Nav Panel + Avatar Gen + Auto Style + CNB Auto-Wake + Remote API + Ollama + ST LLM + Model Compat + Choice Buttons + CORS Proxy');
+    console.log('[Story-Images] 图片功能辅助 v2.2 - Regenerate + Top Nav Panel + Avatar Gen + Auto Style + CNB Auto-Wake + Remote API + Ollama + ST LLM + Model Compat + Choice Buttons + CORS Proxy + Auto Auth Mode');
 });

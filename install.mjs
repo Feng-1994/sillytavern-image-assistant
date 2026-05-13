@@ -11,6 +11,7 @@ const sillynTavernRoot = path.resolve(__dirname, '..', '..', '..', '..', '..');
 const pluginTargetDir = path.join(sillynTavernRoot, 'plugins', 'sillytavern-image-assistant');
 const pluginsDir = path.join(sillynTavernRoot, 'plugins');
 const configFile = path.join(sillynTavernRoot, 'config.yaml');
+const corsProxyFile = path.join(sillynTavernRoot, 'src', 'middleware', 'corsProxy.js');
 
 function ensurePluginInstalled() {
     if (!fs.existsSync(pluginSourceDir)) {
@@ -79,11 +80,64 @@ function updateConfig() {
     }
 }
 
+function patchCorsProxy() {
+    if (!fs.existsSync(corsProxyFile)) {
+        console.warn('[Image Assistant] corsProxy.js not found at:', corsProxyFile);
+        return;
+    }
+
+    let content = fs.readFileSync(corsProxyFile, 'utf8');
+
+    if (content.includes('x-target-authorization') && content.includes("headers['authorization'] = headers['x-target-authorization']")) {
+        console.log('[Image Assistant] CORS proxy already patched for X-Target-Authorization support');
+        return;
+    }
+
+    const patchMarker = "headersToRemove.forEach(header => delete headers[header]);";
+    if (!content.includes(patchMarker)) {
+        console.warn('[Image Assistant] Could not find patch point in corsProxy.js - skipping auto-patch');
+        console.warn('[Image Assistant] You may need to manually add X-Target-Authorization support to your CORS proxy');
+        return;
+    }
+
+    const backupFile = corsProxyFile + '.bak';
+    if (!fs.existsSync(backupFile)) {
+        fs.copyFileSync(corsProxyFile, backupFile);
+        console.log('[Image Assistant] Backed up corsProxy.js to corsProxy.js.bak');
+    }
+
+    if (!content.includes("'x-target-authorization',")) {
+        content = content.replace(
+            "'sec-fetch-dest',",
+            "'sec-fetch-dest',\n    'x-target-authorization',"
+        );
+    }
+
+    const authPatch = `
+
+    if (headers['x-target-authorization']) {
+        headers['authorization'] = headers['x-target-authorization'];
+    } else {
+        delete headers['authorization'];
+    }`;
+
+    if (content.includes('x-target-authorization') && !content.includes("headers['authorization'] = headers['x-target-authorization']")) {
+        content = content.replace(
+            patchMarker,
+            patchMarker + authPatch
+        );
+    }
+
+    fs.writeFileSync(corsProxyFile, content, 'utf8');
+    console.log('[Image Assistant] Patched corsProxy.js for X-Target-Authorization support');
+}
+
 const pluginInstalled = ensurePluginInstalled();
 updateConfig();
+patchCorsProxy();
 
 if (pluginInstalled) {
     console.log('\n[Image Assistant] ✅ Installation complete! Please restart SillyTavern to activate the plugin.');
 } else {
-    console.log('\n[Image Assistant] ⚠️ Plugin installation skipped, but config may have been updated.');
+    console.log('\n[Image Assistant] ⚠️ Plugin installation skipped, but config and CORS proxy may have been updated.');
 }

@@ -12,6 +12,9 @@ const pluginTargetDir = path.join(sillynTavernRoot, 'plugins', 'sillytavern-imag
 const pluginsDir = path.join(sillynTavernRoot, 'plugins');
 const configFile = path.join(sillynTavernRoot, 'config.yaml');
 const corsProxyFile = path.join(sillynTavernRoot, 'src', 'middleware', 'corsProxy.js');
+const stPackageJson = path.join(sillynTavernRoot, 'package.json');
+
+const MIN_ST_VERSION = '1.17.0';
 
 function ensurePluginInstalled() {
     if (!fs.existsSync(pluginSourceDir)) {
@@ -42,102 +45,166 @@ function ensurePluginInstalled() {
     return true;
 }
 
+function parseSemver(versionStr) {
+    const match = versionStr.match(/^(\d+)\.(\d+)\.(\d+)/);
+    if (!match) return null;
+    return [parseInt(match[1], 10), parseInt(match[2], 10), parseInt(match[3], 10)];
+}
+
+function semverGte(a, b) {
+    if (!a || !b) return false;
+    for (let i = 0; i < 3; i++) {
+        if (a[i] > b[i]) return true;
+        if (a[i] < b[i]) return false;
+    }
+    return true;
+}
+
+function getSillyTavernVersion() {
+    if (!fs.existsSync(stPackageJson)) {
+        console.warn('[Image Assistant] SillyTavern package.json not found at:', stPackageJson);
+        return null;
+    }
+
+    try {
+        const pkg = JSON.parse(fs.readFileSync(stPackageJson, 'utf8'));
+        const version = pkg.version;
+        if (!version) {
+            console.warn('[Image Assistant] No version field found in SillyTavern package.json');
+            return null;
+        }
+        console.log(`[Image Assistant] Detected SillyTavern version: ${version}`);
+        return version;
+    } catch (e) {
+        console.warn('[Image Assistant] Failed to parse SillyTavern package.json:', e.message);
+        return null;
+    }
+}
+
+function checkVersionSupport() {
+    const version = getSillyTavernVersion();
+    if (!version) {
+        console.warn('[Image Assistant] Could not determine SillyTavern version - assuming native X-Target-Authorization support is present');
+        return true;
+    }
+
+    const current = parseSemver(version);
+    const minimum = parseSemver(MIN_ST_VERSION);
+
+    if (!current) {
+        console.warn('[Image Assistant] Could not parse SillyTavern version - assuming native X-Target-Authorization support is present');
+        return true;
+    }
+
+    if (semverGte(current, minimum)) {
+        console.log(`[Image Assistant] SillyTavern ${version} >= ${MIN_ST_VERSION} - native X-Target-Authorization support available, no CORS proxy patching needed`);
+        return true;
+    }
+
+    console.warn(`[Image Assistant] SillyTavern ${version} < ${MIN_ST_VERSION} - native X-Target-Authorization support may not be available`);
+    console.warn('[Image Assistant] Consider upgrading SillyTavern to 1.17.0 or later for best compatibility');
+    return false;
+}
+
 function updateConfig() {
     if (!fs.existsSync(configFile)) {
         console.warn('[Image Assistant] config.yaml not found at:', configFile);
         return;
     }
 
-    let config = fs.readFileSync(configFile, 'utf8');
+    const content = fs.readFileSync(configFile, 'utf8');
+    const lines = content.split('\n');
     let changed = false;
+    const keysToEnsure = [
+        { key: 'enableServerPlugins', value: true, label: 'server plugins' },
+        { key: 'enableCorsProxy', value: true, label: 'CORS proxy' },
+    ];
 
-    if (config.includes('enableServerPlugins: false')) {
-        config = config.replace('enableServerPlugins: false', 'enableServerPlugins: true');
-        console.log('[Image Assistant] Enabled server plugins in config.yaml');
-        changed = true;
-    } else if (!config.includes('enableServerPlugins')) {
-        config += '\n# -- Enabled by sillytavern-image-assistant --\nenableServerPlugins: true\n';
-        console.log('[Image Assistant] Added enableServerPlugins: true to config.yaml');
-        changed = true;
-    } else {
-        console.log('[Image Assistant] Server plugins already enabled in config.yaml');
-    }
+    for (const { key, value, label } of keysToEnsure) {
+        const keyPattern = new RegExp(`^${key}\\s*:`);
+        const existingLineIndex = lines.findIndex(line => keyPattern.test(line.trim()));
 
-    if (config.includes('enableCorsProxy: false')) {
-        config = config.replace('enableCorsProxy: false', 'enableCorsProxy: true');
-        console.log('[Image Assistant] Enabled CORS proxy in config.yaml');
-        changed = true;
-    } else if (!config.includes('enableCorsProxy')) {
-        config += '\n# -- Enabled by sillytavern-image-assistant --\nenableCorsProxy: true\n';
-        console.log('[Image Assistant] Added enableCorsProxy: true to config.yaml');
-        changed = true;
-    } else {
-        console.log('[Image Assistant] CORS proxy already enabled in config.yaml');
+        if (existingLineIndex >= 0) {
+            const existingLine = lines[existingLineIndex].trim();
+            const valuePattern = new RegExp(`^${key}\\s*:\\s*${value}\\s*$`);
+            if (valuePattern.test(existingLine)) {
+                console.log(`[Image Assistant] ${label} already enabled in config.yaml`);
+            } else {
+                const currentValue = existingLine.replace(new RegExp(`^${key}\\s*:\\s*`), '').trim();
+                console.log(`[Image Assistant] ${key} is already set to "${currentValue}" in config.yaml - not overwriting`);
+                console.log(`[Image Assistant] To use this extension, please set ${key}: ${value} manually`);
+            }
+        } else {
+            lines.push(`${key}: ${value}`);
+            console.log(`[Image Assistant] Added ${key}: ${value} to config.yaml`);
+            changed = true;
+        }
     }
 
     if (changed) {
-        fs.writeFileSync(configFile, config, 'utf8');
+        fs.writeFileSync(configFile, lines.join('\n'), 'utf8');
     }
 }
 
-function patchCorsProxy() {
+function cleanupLegacyPatches() {
+    const backupFile = corsProxyFile + '.bak';
+
+    if (fs.existsSync(backupFile)) {
+        try {
+            fs.copyFileSync(backupFile, corsProxyFile);
+            fs.unlinkSync(backupFile);
+            console.log('[Image Assistant] Restored corsProxy.js from backup and removed .bak file');
+            return;
+        } catch (e) {
+            console.warn('[Image Assistant] Failed to restore corsProxy.js from backup:', e.message);
+        }
+    }
+
     if (!fs.existsSync(corsProxyFile)) {
-        console.warn('[Image Assistant] corsProxy.js not found at:', corsProxyFile);
         return;
     }
 
     let content = fs.readFileSync(corsProxyFile, 'utf8');
+    let modified = false;
 
-    if (content.includes('x-target-authorization') && content.includes("headers['authorization'] = headers['x-target-authorization']")) {
-        console.log('[Image Assistant] CORS proxy already patched for X-Target-Authorization support');
+    const hasLegacyPatch =
+        content.includes('x-target-authorization') &&
+        content.includes("headers['authorization'] = headers['x-target-authorization']");
+
+    if (!hasLegacyPatch) {
         return;
     }
 
-    const patchMarker = "headersToRemove.forEach(header => delete headers[header]);";
-    if (!content.includes(patchMarker)) {
-        console.warn('[Image Assistant] Could not find patch point in corsProxy.js - skipping auto-patch');
-        console.warn('[Image Assistant] You may need to manually add X-Target-Authorization support to your CORS proxy');
-        return;
+    const authPatchBlock = /\n\s*if\s*\(headers\['x-target-authorization'\]\)\s*\{\s*\n\s*headers\['authorization'\]\s*=\s*headers\['x-target-authorization'\];\s*\n\s*\}\s*else\s*\{\s*\n\s*delete headers\['authorization'\];\s*\n\s*\}/;
+    if (authPatchBlock.test(content)) {
+        content = content.replace(authPatchBlock, '');
+        modified = true;
+        console.log('[Image Assistant] Removed legacy X-Target-Authorization auth patch block from corsProxy.js');
     }
 
-    const backupFile = corsProxyFile + '.bak';
-    if (!fs.existsSync(backupFile)) {
-        fs.copyFileSync(corsProxyFile, backupFile);
-        console.log('[Image Assistant] Backed up corsProxy.js to corsProxy.js.bak');
+    const headerListPatch = /'x-target-authorization',\n/;
+    if (headerListPatch.test(content)) {
+        content = content.replace(headerListPatch, '');
+        modified = true;
+        console.log('[Image Assistant] Removed legacy x-target-authorization header list entry from corsProxy.js');
     }
 
-    if (!content.includes("'x-target-authorization',")) {
-        content = content.replace(
-            "'sec-fetch-dest',",
-            "'sec-fetch-dest',\n    'x-target-authorization',"
-        );
+    if (modified) {
+        fs.writeFileSync(corsProxyFile, content, 'utf8');
+        console.log('[Image Assistant] Cleaned up legacy patches from corsProxy.js');
     }
-
-    const authPatch = `
-
-    if (headers['x-target-authorization']) {
-        headers['authorization'] = headers['x-target-authorization'];
-    } else {
-        delete headers['authorization'];
-    }`;
-
-    if (content.includes('x-target-authorization') && !content.includes("headers['authorization'] = headers['x-target-authorization']")) {
-        content = content.replace(
-            patchMarker,
-            patchMarker + authPatch
-        );
-    }
-
-    fs.writeFileSync(corsProxyFile, content, 'utf8');
-    console.log('[Image Assistant] Patched corsProxy.js for X-Target-Authorization support');
 }
 
 const pluginInstalled = ensurePluginInstalled();
 updateConfig();
-patchCorsProxy();
+
+const nativeSupport = checkVersionSupport();
+if (nativeSupport) {
+    cleanupLegacyPatches();
+}
 
 if (pluginInstalled) {
     console.log('\n[Image Assistant] ✅ Installation complete! Please restart SillyTavern to activate the plugin.');
 } else {
-    console.log('\n[Image Assistant] ⚠️ Plugin installation skipped, but config and CORS proxy may have been updated.');
+    console.log('\n[Image Assistant] ⚠️ Plugin installation skipped, but config may have been updated.');
 }

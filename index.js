@@ -406,7 +406,7 @@ async function cnbCheckComfyStatus(comfyUrl) {
 async function cnbCheckWorkspaceStatus() {
     const settings = getSettings();
     if (!settings.cnbApiToken || !settings.cnbRepoPath) {
-        return { running: false, comfyProxyUrl: null, localTunnelUrl: null };
+        return { running: false, comfyProxyUrl: null, proxyRequiresAuth: false, forwardedAddress: null, forwardedAddressReachable: false, localTunnelUrl: null };
     }
 
     try {
@@ -414,12 +414,12 @@ async function cnbCheckWorkspaceStatus() {
         if (result.status === 'running' && result.workspace) {
             cnbServiceState.workspaceSn = result.workspace.sn;
             cnbServiceState.pipelineId = result.workspace.pipelineId;
-            return { running: true, comfyProxyUrl: result.comfyProxyUrl, localTunnelUrl: result.localTunnelUrl, workspace: result.workspace, detail: result.detail };
+            return { running: true, comfyProxyUrl: result.comfyProxyUrl, proxyRequiresAuth: !!result.proxyRequiresAuth, forwardedAddress: result.forwardedAddress || null, forwardedAddressReachable: !!result.forwardedAddressReachable, localTunnelUrl: result.localTunnelUrl, workspace: result.workspace, detail: result.detail };
         }
-        return { running: false, comfyProxyUrl: null, localTunnelUrl: null };
+        return { running: false, comfyProxyUrl: null, proxyRequiresAuth: false, forwardedAddress: null, forwardedAddressReachable: false, localTunnelUrl: null };
     } catch (e) {
         console.warn('[Story-Images CNB] Check workspace status failed:', e.message);
-        return { running: false, comfyProxyUrl: null, localTunnelUrl: null, error: e.message };
+        return { running: false, comfyProxyUrl: null, proxyRequiresAuth: false, forwardedAddress: null, forwardedAddressReachable: false, localTunnelUrl: null, error: e.message };
     }
 }
 
@@ -442,50 +442,43 @@ async function cnbDetectCorsAuthMode() {
     try {
         const headers = {
             ...getRequestHeaders(),
-            'Authorization': `Bearer ${token}`,
-            'Accept': 'application/json',
+            'X-Target-Authorization': `Bearer ${token}`,
         };
-        const response = await fetch('/proxy/https://api.cnb.cool/user', {
-            method: 'GET',
+        delete headers['Authorization'];
+        delete headers['authorization'];
+        const response = await fetch('/proxy/https://api.cnb.cool/', {
+            method: 'HEAD',
             headers,
         });
-        if (response.ok) {
-            const text = await response.text();
-            try {
-                const data = JSON.parse(text);
-                if (data.username || data.id) {
-                    _cnbCorsAuthMode = 'direct';
-                    return 'direct';
-                }
-            } catch {}
+        if (response.status === 401 || response.status === 403) {
+            // x-target didn't work, try direct
+        } else if (response.status !== 404) {
+            _cnbCorsAuthMode = 'x-target';
+            return 'x-target';
         }
     } catch {}
 
     try {
         const headers = {
             ...getRequestHeaders(),
-            'X-Target-Authorization': `Bearer ${token}`,
-            'Accept': 'application/json',
+            'Authorization': `Bearer ${token}`,
         };
-        delete headers['Authorization'];
-        delete headers['authorization'];
-        const response = await fetch('/proxy/https://api.cnb.cool/user', {
-            method: 'GET',
+        const response = await fetch('/proxy/https://api.cnb.cool/', {
+            method: 'HEAD',
             headers,
         });
-        if (response.ok) {
-            const text = await response.text();
-            try {
-                const data = JSON.parse(text);
-                if (data.username || data.id) {
-                    _cnbCorsAuthMode = 'x-target';
-                    return 'x-target';
-                }
-            } catch {}
+        if (response.status !== 404 && response.status !== 401 && response.status !== 403) {
+            _cnbCorsAuthMode = 'direct';
+            return 'direct';
         }
     } catch {}
 
     return null;
+}
+
+function cnbResetAuthCache() {
+    _cnbCorsAuthMode = null;
+    _cnbCorsProxyAvailable = null;
 }
 
 async function cnbCheckCorsProxyAvailable() {
@@ -529,55 +522,80 @@ async function cnbFetchViaCorsProxy(apiPath, options = {}) {
     const authMode = await cnbDetectCorsAuthMode();
 
     const fullUrl = `${CNB_API_BASE}${apiPath}`;
-    const controller = new AbortController();
-    const timeoutMs = options.timeout || 15000;
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    async function doFetch(mode) {
+        const controller = new AbortController();
+        const timeoutMs = options.timeout || 15000;
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+        try {
+            const headers = {
+                ...getRequestHeaders(),
+                'Accept': 'application/json',
+            };
+
+            if (mode === 'direct') {
+                headers['Authorization'] = `Bearer ${token}`;
+            } else {
+                delete headers['Authorization'];
+                delete headers['authorization'];
+                headers['X-Target-Authorization'] = `Bearer ${token}`;
+            }
+
+            if (options.method && !['GET', 'HEAD'].includes(options.method)) {
+                headers['Content-Type'] = 'application/json';
+            }
+
+            const response = await fetch(`/proxy/${fullUrl}`, {
+                method: options.method || 'GET',
+                headers,
+                body: options.body ? JSON.stringify(options.body) : undefined,
+                signal: controller.signal,
+            });
+            clearTimeout(timeoutId);
+
+            const text = await response.text();
+            let data;
+            try {
+                data = JSON.parse(text);
+            } catch {
+                if (text.startsWith('<!') || text.startsWith('<html') || text.startsWith('<HTML')) {
+                    _cnbCorsProxyAvailable = false;
+                    throw new Error('CORS_PROXY_ERROR');
+                }
+                throw new Error(`CNB API响应不是有效的JSON格式 (${response.status})`);
+            }
+            if (!response.ok) {
+                const err = new Error(data.message || data.error || `CNB API错误 (${response.status})`);
+                err.status = response.status;
+                throw err;
+            }
+            return data;
+        } catch (e) {
+            clearTimeout(timeoutId);
+            if (e.name === 'AbortError') {
+                throw new Error('请求超时');
+            }
+            throw e;
+        }
+    }
 
     try {
-        const headers = {
-            ...getRequestHeaders(),
-            'Accept': 'application/json',
-        };
-
-        if (authMode === 'direct') {
-            headers['Authorization'] = `Bearer ${token}`;
-        } else {
-            delete headers['Authorization'];
-            delete headers['authorization'];
-            headers['X-Target-Authorization'] = `Bearer ${token}`;
-        }
-
-        if (options.method && !['GET', 'HEAD'].includes(options.method)) {
-            headers['Content-Type'] = 'application/json';
-        }
-
-        const response = await fetch(`/proxy/${fullUrl}`, {
-            method: options.method || 'GET',
-            headers,
-            body: options.body ? JSON.stringify(options.body) : undefined,
-            signal: controller.signal,
-        });
-        clearTimeout(timeoutId);
-
-        const text = await response.text();
-        let data;
-        try {
-            data = JSON.parse(text);
-        } catch {
-            if (text.startsWith('<!') || text.startsWith('<html') || text.startsWith('<HTML')) {
-                _cnbCorsProxyAvailable = false;
-                throw new Error('CORS_PROXY_ERROR');
-            }
-            throw new Error(`CNB API响应不是有效的JSON格式 (${response.status})`);
-        }
-        if (!response.ok) {
-            throw new Error(data.message || data.error || `CNB API错误 (${response.status})`);
-        }
-        return data;
+        return await doFetch(authMode || 'x-target');
     } catch (e) {
-        clearTimeout(timeoutId);
-        if (e.name === 'AbortError') {
-            throw new Error('请求超时');
+        if (e.status === 401 || e.status === 403) {
+            const otherMode = (authMode || 'x-target') === 'x-target' ? 'direct' : 'x-target';
+            cnbResetAuthCache();
+            try {
+                const result = await doFetch(otherMode);
+                _cnbCorsAuthMode = otherMode;
+                return result;
+            } catch (retryErr) {
+                if (retryErr.status === 401 || retryErr.status === 403) {
+                    throw new Error('CNB API认证失败，请检查Token是否有效');
+                }
+                throw retryErr;
+            }
         }
         throw e;
     }
@@ -950,26 +968,8 @@ async function cnbWakeService() {
                         buildStage: 'prepare',
                     },
                 });
-            } else if (settings.cnbProjectUrl) {
-                const projectUrl = settings.cnbProjectUrl.replace(/\/+$/, '');
-                const wakeController = new AbortController();
-                const wakeTimeoutId = setTimeout(() => wakeController.abort(), 15000);
-                try {
-                    await fetch(projectUrl, {
-                        method: 'GET',
-                        mode: 'no-cors',
-                        signal: wakeController.signal,
-                    });
-                } catch (e) {
-                    console.log('[Story-Images CNB] Legacy wake request sent (no-cors expected)');
-                }
-                clearTimeout(wakeTimeoutId);
-                cnbUpdateStatusUI('waking', '唤醒请求已发送（传统模式）...', {
-                    progress: 30,
-                    stageLabel: '唤醒中（传统模式）',
-                });
             } else {
-                throw new Error('请配置CNB API Token和仓库路径，或CNB项目URL');
+                throw new Error('请配置CNB API Token和仓库路径');
             }
         } catch (e) {
             console.warn('[Story-Images CNB] Start request error:', e.message);
@@ -1334,6 +1334,26 @@ async function cnbFetchBranches(repoPath) {
     }
 }
 
+async function testComfyUrlReachability(url) {
+    if (!url || typeof url !== 'string') return { reachable: false, reason: 'empty URL' };
+    const normalized = url.replace(/\/+$/, '');
+    try {
+        const resp = await fetch(`${normalized}/system_stats`, {
+            method: 'HEAD',
+            signal: AbortSignal.timeout(5000),
+        });
+        if (resp.status === 401 || resp.status === 403) {
+            return { reachable: false, reason: `auth-required`, status: resp.status };
+        }
+        if (resp.ok || resp.status === 200) {
+            return { reachable: true, status: resp.status };
+        }
+        return { reachable: false, reason: `http-${resp.status}`, status: resp.status };
+    } catch (e) {
+        return { reachable: false, reason: e.name === 'TimeoutError' ? 'timeout' : e.message };
+    }
+}
+
 async function cnbSyncComfyUrl(settings) {
     if (!settings.cnbApiToken || !settings.cnbRepoPath) return;
 
@@ -1345,40 +1365,83 @@ async function cnbSyncComfyUrl(settings) {
         }
 
         let comfyUrl = null;
+        let urlSource = '';
 
-        if (wsStatus.localTunnelUrl) {
+        if (wsStatus.forwardedAddress) {
+            comfyUrl = wsStatus.forwardedAddress.replace(/\/+$/, '');
+            urlSource = 'Forwarded Address (cnb.run)';
+            console.log('[Story-Images CNB] Checking Forwarded Address:', comfyUrl);
+
+            let isReachable = wsStatus.forwardedAddressReachable;
+            if (!isReachable) {
+                isReachable = (await testComfyUrlReachability(comfyUrl)).reachable;
+            }
+
+            if (isReachable) {
+                console.log('[Story-Images CNB] Forwarded Address is reachable ✓');
+            } else {
+                console.log('[Story-Images CNB] Forwarded Address not yet reachable, waiting for ComfyUI to fully start...');
+                comfyUrl = null;
+
+                const maxWait = 120;
+                const pollInterval = 5;
+                let waited = 0;
+                showToast('⏳ ComfyUI正在启动中，等待Forwarded Address就绪...', 'info');
+
+                while (waited < maxWait) {
+                    await new Promise(r => setTimeout(r, pollInterval * 1000));
+                    waited += pollInterval;
+
+                    const recheck = await cnbCheckWorkspaceStatus();
+                    if (!recheck.running) {
+                        console.log('[Story-Images CNB] Workspace stopped while waiting for ComfyUI');
+                        showToast('⚠️ CNB工作空间已停止', 'error');
+                        return;
+                    }
+
+                    if (recheck.forwardedAddressReachable) {
+                        comfyUrl = (recheck.forwardedAddress || wsStatus.forwardedAddress).replace(/\/+$/, '');
+                        urlSource = `Forwarded Address (waited ${waited}s)`;
+                        console.log(`[Story-Images CNB] Forwarded Address is reachable after ${waited}s ✓`);
+                        showToast(`✅ ComfyUI已就绪 (等待${waited}秒)`, 'success');
+                        break;
+                    }
+
+                    const fwdUrl = (recheck.forwardedAddress || wsStatus.forwardedAddress).replace(/\/+$/, '');
+                    const reReachability = await testComfyUrlReachability(fwdUrl);
+                    if (reReachability.reachable) {
+                        comfyUrl = fwdUrl;
+                        urlSource = `Forwarded Address (waited ${waited}s)`;
+                        console.log(`[Story-Images CNB] Forwarded Address is reachable after ${waited}s ✓`);
+                        showToast(`✅ ComfyUI已就绪 (等待${waited}秒)`, 'success');
+                        break;
+                    }
+                    console.log(`[Story-Images CNB] Still waiting... (${waited}s/${maxWait}s) - ${reReachability.reason}`);
+                }
+
+                if (!comfyUrl) {
+                    console.log(`[Story-Images CNB] Forwarded Address still not reachable after ${maxWait}s, will use fallback`);
+                    showToast(`⚠️ ComfyUI启动超时(${maxWait}s)，尝试备用连接`, 'info');
+                }
+            }
+        }
+
+        if (!comfyUrl && wsStatus.localTunnelUrl) {
             comfyUrl = wsStatus.localTunnelUrl;
+            urlSource = 'SSH Tunnel';
             console.log('[Story-Images CNB] Using existing SSH tunnel URL:', comfyUrl);
         }
 
-        if (!comfyUrl && settings.cnbApiToken && settings.cnbRepoPath) {
-            cnbUpdateStatusUI('waking', '正在建立SSH隧道...', {
-                progress: 92,
-                stageLabel: '建立SSH隧道',
-                detail: { workspaceSn: wsStatus.workspace.sn || '' },
-            });
-
-            try {
-                const tunnelResult = await cnbApiCall('/setup-tunnel', { method: 'POST', timeout: 20000 });
-                if (tunnelResult.localTunnelUrl) {
-                    comfyUrl = tunnelResult.localTunnelUrl;
-                    console.log('[Story-Images CNB] SSH tunnel established, local URL:', comfyUrl);
-                }
-            } catch (e) {
-                console.warn('[Story-Images CNB] SSH tunnel setup failed:', e.message);
-            }
-        }
-
-        if (!comfyUrl && wsStatus.comfyProxyUrl) {
+        if (!comfyUrl && wsStatus.comfyProxyUrl && !wsStatus.proxyRequiresAuth) {
             comfyUrl = wsStatus.comfyProxyUrl;
-            console.log('[Story-Images CNB] Fallback to CNB web proxy URL (requires browser auth):', comfyUrl);
+            urlSource = 'CNB Web Proxy';
+            console.log('[Story-Images CNB] Fallback to CNB web proxy URL:', comfyUrl);
         }
 
-        if (!comfyUrl) {
-            const pipelineId = wsStatus.workspace.pipelineId || cnbServiceState.pipelineId;
-            if (pipelineId) {
-                comfyUrl = `https://cnb.cool/${settings.cnbRepoPath}/-/workspace/proxy/${pipelineId}/8188`;
-            }
+        if (!comfyUrl && wsStatus.forwardedAddress) {
+            comfyUrl = wsStatus.forwardedAddress.replace(/\/+$/, '');
+            urlSource = 'Forwarded Address (unreachable, best-effort)';
+            console.log('[Story-Images CNB] Using Forwarded Address despite reachability check:', comfyUrl);
         }
 
         if (comfyUrl && typeof comfyUrl === 'string') {
@@ -1387,18 +1450,25 @@ async function cnbSyncComfyUrl(settings) {
             const sd = extension_settings.sd;
             if (sd) {
                 const oldUrl = sd.comfy_url || '';
+                const oldSource = sd.source || '';
                 sd.comfy_url = comfyUrl;
+                if (sd.source !== 'comfy') {
+                    sd.source = 'comfy';
+                    const sourceSelect = document.getElementById('sd_source');
+                    if (sourceSelect) sourceSelect.value = 'comfy';
+                    console.log(`[Story-Images CNB] Auto-set SD source: ${oldSource} → comfy`);
+                }
                 saveSettingsDebounced();
 
                 const comfyUrlInput = document.getElementById('comfy_url');
                 if (comfyUrlInput) comfyUrlInput.value = comfyUrl;
 
-                console.log(`[Story-Images CNB] Auto-synced ComfyUI URL: ${oldUrl} → ${comfyUrl}`);
-                showToast(`🔗 ComfyUI URL已自动同步: ${comfyUrl}`, 'success');
+                console.log(`[Story-Images CNB] Auto-synced ComfyUI URL (${urlSource}): ${oldUrl} → ${comfyUrl}`);
+                showToast(`🔗 ComfyUI URL已自动同步 (${urlSource}): ${comfyUrl}`, 'success');
             }
         } else {
             console.log('[Story-Images CNB] Could not determine ComfyUI URL.');
-            showToast('⚠️ 无法确定ComfyUI URL，请检查SSH密钥配置', 'error');
+            showToast('⚠️ 无法确定ComfyUI URL，请检查CNB服务状态', 'error');
         }
     } catch (e) {
         console.warn('[Story-Images CNB] Sync ComfyUI URL failed:', e);
@@ -1492,13 +1562,8 @@ async function cnbAutoSetup(retryFromStep) {
         return false;
     }
 
-    if (!settings.cnbApiToken && !settings.cnbProjectUrl) {
-        showToast('⚠️ 请先配置CNB API Token和仓库路径，或CNB项目URL', 'error');
-        return false;
-    }
-
-    if (!settings.cnbApiToken && settings.cnbProjectUrl) {
-        showToast('⚠️ 传统URL模式不支持一键启动，请配置API Token', 'error');
+    if (!settings.cnbApiToken) {
+        showToast('⚠️ 请先配置CNB API Token和仓库路径', 'error');
         return false;
     }
 
@@ -2057,6 +2122,20 @@ function cnbUpdateStatusUI(status, message, extra) {
             上次检测: ${lastCheck} | 上次启动: ${lastWake}${snInfo}${autoStopInfo}
         </div>
     `;
+
+    const forwardedEl = document.getElementById('si_cnb_forwarded_address');
+    if (forwardedEl) {
+        if (cnbServiceState.pipelineId) {
+            const fwdUrl = `https://${cnbServiceState.pipelineId}-8188.cnb.run/`;
+            if (status === 'online') {
+                forwardedEl.innerHTML = `<a href="${fwdUrl}" target="_blank" style="color: #4a9eff; text-decoration: none;">${fwdUrl}</a>`;
+            } else {
+                forwardedEl.textContent = fwdUrl;
+            }
+        } else {
+            forwardedEl.textContent = '服务未启动';
+        }
+    }
 }
 
 function cnbFormatDuration(ms) {
@@ -3328,18 +3407,44 @@ async function validateBeforeGeneration() {
     return true;
 }
 
+async function waitForGeneratePicture(maxRetries = 10, intervalMs = 500) {
+    for (let i = 0; i < maxRetries; i++) {
+        if (typeof globalThis.generatePicture === 'function') return globalThis.generatePicture;
+        if (typeof generatePicture === 'function') return generatePicture;
+        if (i < maxRetries - 1) {
+            if (i === 0) console.log('[Story-Images] Waiting for generatePicture to become available...');
+            await new Promise(r => setTimeout(r, intervalMs));
+        }
+    }
+    return null;
+}
+
 async function generateImageForTag(description, charName, tagType) {
     const sd = extension_settings.sd;
     if (!sd) {
-        showToast('SD扩展未加载', 'error');
+        showToast('图片生成扩展未加载，请在扩展管理中确认Image Generation已启用', 'error');
         return null;
     }
-    if (!sd.source) {
-        showToast('未配置图片生成源', 'error');
-        return null;
+    if (!sd.source || sd.source === 'extras') {
+        const settings = getSettings();
+        if (settings.cnbEnabled) {
+            console.log('[Story-Images] SD source not configured, attempting CNB auto-setup...');
+            const ready = await cnbEnsureServiceReady();
+            if (ready && extension_settings.sd?.source === 'comfy') {
+                console.log('[Story-Images] CNB auto-setup succeeded, source is now comfy');
+            } else {
+                showToast('图片生成源未配置，请先在Image Generation扩展中选择ComfyUI并配置连接地址，或启用CNB服务自动配置', 'error');
+                return null;
+            }
+        } else {
+            showToast('图片生成源未配置，请在Image Generation扩展设置中选择生成源（如ComfyUI）', 'error');
+            return null;
+        }
     }
-    if (typeof globalThis.generatePicture !== 'function') {
-        showToast('generatePicture不可用', 'error');
+    const _generatePicture = await waitForGeneratePicture();
+    if (!_generatePicture) {
+        console.warn('[Story-Images] generatePicture not available after waiting. SD extension may not be loaded.');
+        showToast('图片生成功能不可用 — Image Generation扩展可能未正确加载，请刷新页面后重试', 'error');
         return null;
     }
 
@@ -3421,7 +3526,7 @@ async function generateImageForTag(description, charName, tagType) {
         }
 
         try {
-            let result = await globalThis.generatePicture('command', args, trigger);
+            let result = await _generatePicture('command', args, trigger);
 
             logGeneration({
                 originalDescription: description,
@@ -3444,7 +3549,7 @@ async function generateImageForTag(description, charName, tagType) {
                     return defaults[m] || '';
                 }).filter(Boolean).join(', ');
                 const retryTrigger = isDirectMode ? retryPrompt : trigger;
-                result = await globalThis.generatePicture('command', args, retryTrigger);
+                result = await _generatePicture('command', args, retryTrigger);
                 logGeneration({
                     originalDescription: description,
                     expandedPrompt: expandedPrompt,
@@ -4159,7 +4264,7 @@ async function testComfyConnectionCommand() {
     result += `CNB自动唤醒: ${settings.cnbEnabled ? '已启用' : '未启用'}\n`;
 
     if (settings.cnbEnabled) {
-        result += `CNB项目URL: ${settings.cnbProjectUrl || '未配置'}\n`;
+        result += `Forwarded Address: ${cnbServiceState.pipelineId ? `https://${cnbServiceState.pipelineId}-8188.cnb.run/` : '未获取'}\n`;
         result += `CNB服务状态: ${cnbServiceState.status}\n`;
         result += `自动唤醒: ${settings.cnbAutoWake ? '已启用' : '未启用'}\n`;
         result += `保持活跃: ${settings.cnbKeepAlive ? '已启用' : '未启用'}\n`;
@@ -4427,7 +4532,7 @@ async function loadSettingsUI() {
 
     container.innerHTML = `
         <div class="story-images-settings">
-            <h4>📷 图片功能辅助 v2.2</h4>
+            <h4>📷 图片功能辅助 v2.4.0</h4>
             <div style="margin: 8px 0; padding: 8px; background: rgba(74,158,255,0.1); border-radius: 4px; font-size: 12px;">
                 <strong>可用指令：</strong><br>
                 <code>/init-story [场景]</code> - 初始化故事画像<br>
@@ -4514,13 +4619,10 @@ async function loadSettingsUI() {
                         <input type="text" id="si_cnb_branch" value="${escapeHtml(settings.cnbBranch || 'main')}" placeholder="main" style="margin-top: 2px; ${settings.cnbApiToken && settings.cnbRepoPath ? 'display:none;' : ''}">
                     </label>
                 </div>
-                <div style="margin-bottom: 8px; padding: 6px; background: rgba(255,200,0,0.05); border: 1px solid rgba(255,200,0,0.15); border-radius: 4px;">
-                    <div style="font-size: 11px; font-weight: bold; color: #ffc800; margin-bottom: 4px;">⚙️ 传统模式（备用）</div>
-                    <label style="display:block; margin: 4px 0;">
-                        CNB项目URL:
-                        <input type="text" id="si_cnb_project_url" value="${escapeHtml(settings.cnbProjectUrl || '')}" placeholder="https://xxx.cnb.cool 或 https://xxx.cnb.zone" style="margin-top: 2px;">
-                        <div style="font-size: 10px; color: #666; margin-top: 2px;">未配置API Token时使用传统no-cors唤醒模式</div>
-                    </label>
+                <div style="margin-bottom: 8px; padding: 6px; background: rgba(74,158,255,0.05); border: 1px solid rgba(74,158,255,0.15); border-radius: 4px;">
+                    <div style="font-size: 11px; font-weight: bold; color: #4a9eff; margin-bottom: 4px;">🌐 ComfyUI Forwarded Address</div>
+                    <div id="si_cnb_forwarded_address" style="font-size: 11px; color: #94a3b8; word-break: break-all; min-height: 16px; padding: 2px 4px; background: rgba(0,0,0,0.2); border-radius: 3px;">${cnbServiceState.pipelineId ? `https://${cnbServiceState.pipelineId}-8188.cnb.run/` : '服务未启动'}</div>
+                    <div style="font-size: 10px; color: #666; margin-top: 2px;">ComfyUI完全启动后自动获取的转发地址（cnb.run格式）</div>
                 </div>
                 <label><input type="checkbox" id="si_cnb_auto_wake" ${settings.cnbAutoWake ? 'checked' : ''}> 自动启动（检测到离线时自动启动服务）</label>
                 <label style="display:block; margin: 4px 0;">
@@ -4947,12 +5049,6 @@ async function loadSettingsUI() {
         this.disabled = false;
     });
 
-    document.getElementById('si_cnb_project_url')?.addEventListener('change', function () {
-        settings.cnbProjectUrl = this.value.trim();
-        saveSettingsDebounced();
-        showToast('CNB项目URL已更新', 'success');
-    });
-
     document.getElementById('si_cnb_auto_wake')?.addEventListener('change', function () {
         settings.cnbAutoWake = !!this.checked;
         saveSettingsDebounced();
@@ -5026,8 +5122,8 @@ async function loadSettingsUI() {
 
     document.getElementById('si_cnb_start_service')?.addEventListener('click', async function () {
         const settings = getSettings();
-        if (!settings.cnbApiToken && !settings.cnbProjectUrl) {
-            showToast('请先配置CNB API Token和仓库路径，或CNB项目URL', 'error');
+        if (!settings.cnbApiToken) {
+            showToast('请先配置CNB API Token和仓库路径', 'error');
             return;
         }
         await cnbAutoSetup();
@@ -6033,9 +6129,22 @@ function buildAvatarPromptFromInfo(charInfo) {
 
 async function generateAvatarImage() {
     const sd = extension_settings.sd;
-    if (!sd) { showToast('SD扩展未加载', 'error'); return null; }
-    if (!sd.source) { showToast('未配置图片生成源', 'error'); return null; }
-    if (typeof globalThis.generatePicture !== 'function') { showToast('generatePicture不可用', 'error'); return null; }
+    if (!sd) { showToast('图片生成扩展未加载，请在扩展管理中确认Image Generation已启用', 'error'); return null; }
+    if (!sd.source || sd.source === 'extras') {
+        const settings = getSettings();
+        if (settings.cnbEnabled) {
+            const ready = await cnbEnsureServiceReady();
+            if (!ready || extension_settings.sd?.source !== 'comfy') {
+                showToast('图片生成源未配置，请先在Image Generation扩展中选择ComfyUI并配置连接地址', 'error');
+                return null;
+            }
+        } else {
+            showToast('图片生成源未配置，请在Image Generation扩展设置中选择生成源（如ComfyUI）', 'error');
+            return null;
+        }
+    }
+    const _generatePicture = await waitForGeneratePicture();
+    if (!_generatePicture) { showToast('图片生成功能不可用，请确保已启用Image Generation扩展并配置了生成源', 'error'); return null; }
     const charInfo = extractCharacterInfo();
     if (!charInfo) { showToast('无法获取角色信息', 'error'); return null; }
     showToast(`🎨 正在为 ${charInfo.name} 生成头像...`, 'info');
@@ -6070,7 +6179,7 @@ async function generateAvatarImage() {
         const args = {};
         if (charInfo.existingNegative || styleConfig.negativeExtra) args.negative = (charInfo.existingNegative || '') + (styleConfig.negativeExtra || '');
         try {
-            const result = await globalThis.generatePicture('command', args, trigger);
+            const result = await _generatePicture('command', args, trigger);
             if (result) {
                 showToast(`✅ ${charInfo.name} 头像生成成功!`, 'success');
                 showAvatarPreview(result, charInfo, sanitizedPrompt);
@@ -6413,5 +6522,5 @@ jQuery(async () => {
 
     setTimeout(() => scanAllVisibleMessages(), 1500);
 
-    console.log('[Story-Images] 图片功能辅助 v2.2 - Regenerate + Top Nav Panel + Avatar Gen + Auto Style + CNB Auto-Wake + Remote API + Ollama + ST LLM + Model Compat + Choice Buttons + CORS Proxy + Auto Auth Mode');
+    console.log('[Story-Images] 图片功能辅助 v2.5.0 - generatePicture延迟查找+重试 + ComfyUI启动等待轮询 + Forwarded Address可达性检测');
 });

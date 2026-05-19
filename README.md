@@ -119,6 +119,18 @@ node public/scripts/extensions/third-party/sillytavern-image-assistant/install.m
 
 ## 📝 版本历史
 
+### v2.3.0
+
+**🔒 安全修复 - 不再修改SillyTavern核心文件**
+
+- 🛡️ **移除 `patchCorsProxy()`** - 不再直接修改SillyTavern核心文件 `corsProxy.js`，避免版本升级后产生兼容性问题
+- 🛡️ **新增 `cleanupLegacyPatches()`** - 自动清理旧版安装脚本遗留的CORS代理补丁
+- 🔍 **新增版本检测** - 自动检测SillyTavern版本，v1.17.0+无需补丁即可原生支持 `X-Target-Authorization`
+- 🔧 **安全修改 `updateConfig()`** - 不再覆盖用户已有的配置值，仅在配置项缺失时追加
+- ⚡ **优化认证模式检测** - 使用轻量级HEAD请求替代GET请求，减少API调用开销
+- ⚡ **认证模式自动重试** - CORS代理请求遇到401/403时自动切换认证模式重试
+- ⚡ **新增缓存失效机制** - 设置变更时自动重置认证缓存，确保下次请求使用正确模式
+
 ### v2.1.0
 
 **🎯 安装即用 - 无需额外配置**

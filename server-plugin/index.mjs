@@ -364,6 +364,31 @@ export async function init(router) {
         const detailResult = await cnbFetch(`/${encodeRepoPath(validation.normalized)}/-/workspace/detail/${ws.sn}`, { token });
 
         let comfyProxyUrl = null;
+        let proxyRequiresAuth = false;
+        let forwardedAddress = null;
+        let forwardedAddressReachable = false;
+        if (ws.pipeline_id) {
+            forwardedAddress = `https://${ws.pipeline_id}-8188.cnb.run/`;
+            console.log(`[Image Assistant] Forwarded Address: ${forwardedAddress}`);
+            try {
+                const probeController = new AbortController();
+                const probeTimeout = setTimeout(() => probeController.abort(), 8000);
+                const probeResp = await fetch(forwardedAddress, {
+                    method: 'HEAD',
+                    signal: probeController.signal,
+                    redirect: 'follow',
+                });
+                clearTimeout(probeTimeout);
+                if (probeResp.ok || probeResp.status === 200) {
+                    forwardedAddressReachable = true;
+                    console.log(`[Image Assistant] Forwarded Address is reachable`);
+                } else {
+                    console.log(`[Image Assistant] Forwarded Address returned HTTP ${probeResp.status}, ComfyUI may not be ready yet`);
+                }
+            } catch (e) {
+                console.log(`[Image Assistant] Forwarded Address probe failed (${e.message}), ComfyUI may not be ready yet`);
+            }
+        }
         if (detailResult.ok && detailResult.data?.webide) {
             comfyProxyUrl = detailResult.data.webide.replace(/\/vscode-web\/.*/, `/proxy/${ws.pipeline_id}/8188`);
         }
@@ -387,6 +412,9 @@ export async function init(router) {
             },
             detail: detailResult.ok ? detailResult.data : null,
             comfyProxyUrl,
+            proxyRequiresAuth,
+            forwardedAddress,
+            forwardedAddressReachable,
             localTunnelUrl,
         });
     });

@@ -3700,7 +3700,14 @@ function buildFinalPrompt(expandedPrompt, charPrompt, charNegative, isDirectMode
         if (charInfo && charInfo.structured) {
             return buildStructuredScenePrompt(charInfo, expandedPrompt, null);
         }
-        return expandedPrompt;
+        let directPrompt = expandedPrompt;
+        if (!/1girl|1boy|1other|multiple|solo|couple/i.test(directPrompt)) {
+            directPrompt = '1girl, ' + directPrompt;
+        }
+        if (!/close-up|upper_body|full_body|from_above|from_below|pov|wide_shot|portrait|cowboy_shot/i.test(directPrompt)) {
+            directPrompt += ', upper_body';
+        }
+        return directPrompt;
     }
 
     let finalPrompt = expandedPrompt;
@@ -6644,6 +6651,10 @@ function buildStructuredScenePrompt(charInfo, sceneTags, styleConfig) {
     }
 
     if (s.occupation && !sceneLower.includes(s.occupation)) tags.push(s.occupation);
+
+    if (s.expression && !sceneLower.includes(s.expression) && !tags.some(t => /smile|grin|frown|cry|blush|angry|serious|sad|surprised/i.test(t))) {
+        tags.push(s.expression);
+    }
 
     if (sceneTags) {
         const sceneParts = sceneTags.split(',').map(t => t.trim()).filter(t => t.length > 0);

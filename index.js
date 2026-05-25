@@ -4570,6 +4570,12 @@ async function loadSettingsUI() {
                 <span style="color: #888;">参数: CFG=${styleConfig.scale} Steps=${styleConfig.steps} Sampler=${styleConfig.sampler} Size=${styleConfig.size || '默认'}</span><br>
                 <span style="color: #888; font-size: 10px;">💡 ${styleConfig.tip || ''}</span>
             </div>
+            <div style="display: flex; gap: 6px; margin-top: 6px;">
+                <button id="si_sync_style_to_sd" class="si-action-btn" style="flex: 1; background: linear-gradient(135deg, rgba(74,158,255,0.2), rgba(0,200,100,0.2)); border-color: rgba(74,158,255,0.4); color: #4a9eff; font-weight: bold;">
+                    <span class="si-action-icon">🔄</span><span class="si-action-text">同步风格到SD扩展</span>
+                </button>
+            </div>
+            <div id="si_sync_style_status" style="margin-top: 4px; font-size: 11px; display: none;"></div>
 
             <h4>🔄 ComfyUI工作流</h4>
             <label style="display:block; margin: 4px 0;">
@@ -4891,6 +4897,100 @@ async function loadSettingsUI() {
                 this.style.background = 'rgba(0,0,0,0.2)';
             }
         });
+    });
+
+    document.getElementById('si_sync_style_to_sd')?.addEventListener('click', async function () {
+        const btn = this;
+        const statusEl = document.getElementById('si_sync_style_status');
+        const sd = extension_settings.sd;
+
+        if (!sd) {
+            showToast('SD扩展未加载，无法同步风格参数', 'error');
+            if (statusEl) { statusEl.style.display = 'block'; statusEl.style.color = '#ff5050'; statusEl.textContent = '❌ SD扩展未加载，请确认Image Generation扩展已启用'; }
+            return;
+        }
+
+        const iconEl = btn.querySelector('.si-action-icon');
+        const textEl = btn.querySelector('.si-action-text');
+        const origIcon = iconEl?.textContent || '🔄';
+        const origText = textEl?.textContent || '同步风格到SD扩展';
+
+        iconEl && (iconEl.textContent = '⏳');
+        textEl && (textEl.textContent = '同步中...');
+        btn.disabled = true;
+        btn.style.opacity = '0.7';
+        if (statusEl) { statusEl.style.display = 'block'; statusEl.style.color = '#4a9eff'; statusEl.textContent = '⏳ 正在同步风格参数到SD扩展...'; }
+
+        try {
+            const styleConfig = getStyleConfig();
+            const currentSettings = getSettings();
+            const changes = [];
+
+            if (styleConfig.scale !== undefined && sd.scale !== styleConfig.scale) {
+                sd.scale = styleConfig.scale; changes.push(`CFG=${styleConfig.scale}`);
+            }
+            if (styleConfig.steps !== undefined && sd.steps !== styleConfig.steps) {
+                sd.steps = styleConfig.steps; changes.push(`Steps=${styleConfig.steps}`);
+            }
+            if (styleConfig.sampler && sd.sampler !== styleConfig.sampler) {
+                sd.sampler = styleConfig.sampler; changes.push(`Sampler=${styleConfig.sampler}`);
+            }
+            if (styleConfig.size) {
+                const [w, h] = styleConfig.size.split('x').map(Number);
+                if (w && h && (sd.width !== w || sd.height !== h)) {
+                    sd.width = w; sd.height = h; changes.push(`Size=${styleConfig.size}`);
+                }
+            }
+            if (styleConfig.promptPrefix && sd.prompt_prefix !== styleConfig.promptPrefix) {
+                sd.prompt_prefix = styleConfig.promptPrefix; changes.push('前缀');
+            }
+            if (currentSettings.comfyWorkflow && sd.comfy_workflow !== currentSettings.comfyWorkflow) {
+                sd.comfy_workflow = currentSettings.comfyWorkflow; changes.push('工作流');
+            }
+            if (currentSettings.cnbEnabled && sd.source !== 'comfy') {
+                sd.source = 'comfy';
+                const sourceSelect = document.getElementById('sd_source');
+                if (sourceSelect) sourceSelect.value = 'comfy';
+                changes.push('Source=ComfyUI');
+            }
+
+            const comfyUrlInput = document.getElementById('comfy_url');
+            if (comfyUrlInput && sd.comfy_url) { comfyUrlInput.value = sd.comfy_url; }
+            const scaleInput = document.getElementById('sd_scale');
+            if (scaleInput) { scaleInput.value = sd.scale; }
+            const stepsInput = document.getElementById('sd_steps');
+            if (stepsInput) { stepsInput.value = sd.steps; }
+
+            saveSettingsDebounced();
+
+            await new Promise(r => setTimeout(r, 300));
+
+            if (changes.length > 0) {
+                iconEl && (iconEl.textContent = '✅');
+                textEl && (textEl.textContent = '同步成功');
+                if (statusEl) { statusEl.style.color = '#00c864'; statusEl.textContent = `✅ 已同步 ${changes.length} 项参数: ${changes.join(', ')}`; }
+                showToast(`🎨 风格参数已同步: ${changes.join(', ')}`, 'success');
+            } else {
+                iconEl && (iconEl.textContent = '✅');
+                textEl && (textEl.textContent = '已同步');
+                if (statusEl) { statusEl.style.color = '#00c864'; statusEl.textContent = '✅ 所有参数已是最新，无需更新'; }
+                showToast('🎨 风格参数已是最新状态', 'info');
+            }
+        } catch (err) {
+            console.error('[Story-Images] Style sync error:', err);
+            iconEl && (iconEl.textContent = '❌');
+            textEl && (textEl.textContent = '同步失败');
+            if (statusEl) { statusEl.style.color = '#ff5050'; statusEl.textContent = `❌ 同步失败: ${err.message}`; }
+            showToast(`风格同步失败: ${err.message}`, 'error');
+        } finally {
+            btn.disabled = false;
+            btn.style.opacity = '1';
+            setTimeout(() => {
+                iconEl && (iconEl.textContent = origIcon);
+                textEl && (textEl.textContent = origText);
+                if (statusEl) { setTimeout(() => { statusEl.style.display = 'none'; }, 3000); }
+            }, 2000);
+        }
     });
 
     document.getElementById('si_comfy_workflow')?.addEventListener('change', function () {
@@ -6522,5 +6622,5 @@ jQuery(async () => {
 
     setTimeout(() => scanAllVisibleMessages(), 1500);
 
-    console.log('[Story-Images] 图片功能辅助 v2.5.0 - generatePicture延迟查找+重试 + ComfyUI启动等待轮询 + Forwarded Address可达性检测');
+    console.log('[Story-Images] 图片功能辅助 v2.6.0 - Style sync to SD extension + generatePicture retry + ComfyUI startup polling');
 });

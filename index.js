@@ -2335,13 +2335,44 @@ async function autoSwitchModel(styleKey) {
             showToast(`🔄 已自动切换模型: ${targetModel}`, 'success');
             return true;
         } else {
-            showToast(`⚠️ 推荐模型 ${recommendedProfile.name} 未安装，使用当前模型参数`, 'info');
+            const currentModelFile = sd.model;
+            const isCurrentModelAvailable = !currentModelFile || availableModels.includes(currentModelFile);
+            if (!isCurrentModelAvailable && availableModels.length > 0) {
+                const bestFallback = findBestFallbackModel(availableModels, styleKey);
+                sd.model = bestFallback;
+                console.log(`[Story-Images] Recommended model unavailable, current model invalid. Fallback to: ${bestFallback}`);
+                showToast(`⚠️ 推荐模型 ${recommendedProfile.name} 未安装，当前模型也不可用，已切换至: ${bestFallback}`, 'info');
+            } else if (isCurrentModelAvailable) {
+                console.log(`[Story-Images] Recommended model unavailable, keeping current valid model: ${currentModelFile}`);
+                showToast(`⚠️ 推荐模型 ${recommendedProfile.name} 未安装，使用当前模型: ${currentModelFile}`, 'info');
+            } else {
+                console.log(`[Story-Images] No available models found in ComfyUI`);
+                showToast(`⚠️ ComfyUI中未找到可用模型`, 'error');
+            }
             return false;
         }
     } catch (e) {
         console.warn('[Story-Images] Failed to auto-switch model:', e.message);
         return false;
     }
+}
+
+function findBestFallbackModel(availableModels, styleKey) {
+    const styleConfig = STYLE_CONFIGS[styleKey];
+    if (styleConfig) {
+        for (const [modelId, config] of Object.entries(styleConfig.modelConfigs)) {
+            const profile = MODEL_PROFILES[modelId];
+            if (profile) {
+                const match = availableModels.find(m => profile.pattern.test(m.toLowerCase()));
+                if (match) return match;
+            }
+        }
+    }
+    for (const [modelId, profile] of Object.entries(MODEL_PROFILES)) {
+        const match = availableModels.find(m => profile.pattern.test(m.toLowerCase()));
+        if (match) return match;
+    }
+    return availableModels[0] || '';
 }
 
 function sanitizeExpandedPrompt(raw) {
@@ -3506,6 +3537,26 @@ async function generateImageForTag(description, charName, tagType) {
         sdOverrides.comfy_workflow = styleConfig.workflow;
     } else if (settings.comfyWorkflow && sd.source === 'comfy') {
         sdOverrides.comfy_workflow = settings.comfyWorkflow;
+    }
+
+    if (sd.source === 'comfy' && sd.model) {
+        try {
+            const comfyUrl = (sd.comfy_url || 'http://127.0.0.1:8188').replace(/\/+$/, '');
+            const resp = await fetch(`${comfyUrl}/object_info/CheckpointLoaderSimple`);
+            if (resp.ok) {
+                const data = await resp.json();
+                const availableModels = data.CheckpointLoaderSimple?.input?.required?.ckpt_name?.[0] || [];
+                if (!availableModels.includes(sd.model)) {
+                    const fallback = findBestFallbackModel(availableModels, settings.style || 'anime');
+                    if (fallback) {
+                        sdOverrides.model = fallback;
+                        console.log(`[Story-Images] Model '${sd.model}' not available, overriding to '${fallback}'`);
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn('[Story-Images] Could not verify model availability:', e.message);
+        }
     }
 
     const args = {};
@@ -6330,6 +6381,20 @@ async function generateAvatarImage() {
     }
     if (styleConfig.workflow && sd.source === 'comfy' && !settings.comfyWorkflow) sdOverrides.comfy_workflow = styleConfig.workflow;
     else if (settings.comfyWorkflow && sd.source === 'comfy') sdOverrides.comfy_workflow = settings.comfyWorkflow;
+    if (sd.source === 'comfy' && sd.model) {
+        try {
+            const comfyUrl = (sd.comfy_url || 'http://127.0.0.1:8188').replace(/\/+$/, '');
+            const resp = await fetch(`${comfyUrl}/object_info/CheckpointLoaderSimple`);
+            if (resp.ok) {
+                const data = await resp.json();
+                const availableModels = data.CheckpointLoaderSimple?.input?.required?.ckpt_name?.[0] || [];
+                if (!availableModels.includes(sd.model)) {
+                    const fallback = findBestFallbackModel(availableModels, settings.style || 'anime');
+                    if (fallback) sdOverrides.model = fallback;
+                }
+            }
+        } catch (_) {}
+    }
     return await withSdSettings(sdOverrides, async () => {
         const trigger = sanitizedPrompt;
         const args = {};
@@ -6678,5 +6743,5 @@ jQuery(async () => {
 
     setTimeout(() => scanAllVisibleMessages(), 1500);
 
-    console.log('[Story-Images] 图片功能辅助 v2.6.1 - Fix style sync: jQuery trigger UI update + full param coverage');
+    console.log('[Story-Images] 图片功能辅助 v2.7.0 - Fix model fallback when recommended model unavailable in ComfyUI');
 });

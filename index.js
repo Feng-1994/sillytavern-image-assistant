@@ -2399,24 +2399,29 @@ Output ONLY a valid JSON object with these exact fields:
 
 CRITICAL RULES:
 - Output ONLY the JSON object, no other text, no markdown, no explanation
+- sd_tags MUST include the character's core appearance features from the character card (hair color, hair style, eye color, ears, race, etc.)
 - sd_tags must use underscores for spaces: "red_silk_dress" not "red silk dress"
 - sd_tags must start with subject count: "1girl" or "1boy" etc.
-- sd_tags must include ALL visual elements: subject + action + expression + clothing + setting + lighting + camera
+- sd_tags must include ALL visual elements: subject + appearance + action + expression + clothing + setting + lighting + camera
 - Do NOT include quality tags (masterpiece, best quality etc) - they are added automatically
-- Do NOT repeat character base tags - only add NEW scene-specific tags
+- The character's BASE appearance tags (hair, eyes, ears, race) MUST appear in sd_tags - these are non-negotiable
+- For clothing: if the character card specifies clothing, use it; if the scene implies different clothing, describe the scene-specific clothing
+- For expression: derive from the CURRENT conversation mood, not the character's default personality
+- For action: derive from what the character is DOING in the latest message
 - If the conversation has NO visual/scene content (pure abstract discussion), set should_generate to false
 - Match the visual style to the mood: romantic mood = soft warm lighting, dramatic mood = strong contrast lighting
 - For realistic style: add "photorealistic, raw_photo, 8k" to sd_tags
 - For anime style: use anime-specific tags like "anime_style" if appropriate`;
 
 const SMART_SCENE_USER_TEMPLATE = `Character: {charName}
-Character base tags: {charPrompt}
+Character base appearance tags (MUST include in sd_tags): {charStructuredTags}
+Character description: {charDescription}
 Current image style: {styleLabel}
 
 Recent conversation (latest messages at bottom):
 {conversationHistory}
 
-Analyze the most recent scene and generate SD tags. Output ONLY the JSON object.`;
+Analyze the most recent scene. Your sd_tags MUST include the character's base appearance tags plus scene-specific tags. Output ONLY the JSON object.`;
 
 function getRecentChatContext(messageId, count) {
     const settings = getSettings();
@@ -2435,9 +2440,14 @@ function getRecentChatContext(messageId, count) {
 
 async function analyzeSceneWithLLM(context, charName, charPrompt, styleKey) {
     const styleConfig = STYLE_CONFIGS[styleKey] || STYLE_CONFIGS.anime;
+    const charInfo = extractCharacterInfo();
+    const charStructuredTags = charInfo ? buildStructuredScenePrompt(charInfo, '', null) : (charPrompt || 'no specific character tags');
+    const charDescription = charInfo ? (charInfo.description || '').substring(0, 500) : '';
+
     const userPrompt = SMART_SCENE_USER_TEMPLATE
         .replace('{charName}', charName || 'unknown')
-        .replace('{charPrompt}', charPrompt || 'no specific character tags')
+        .replace('{charStructuredTags}', charStructuredTags)
+        .replace('{charDescription}', charDescription || 'no description available')
         .replace('{styleLabel}', styleConfig.label || 'anime')
         .replace('{conversationHistory}', context);
 
@@ -2661,7 +2671,7 @@ async function smartSceneGenerate(messageId) {
         await autoSwitchModel(styleKey);
     }
 
-    const finalPrompt = buildFinalPrompt(sceneTags, charPrompt, '', true);
+    const finalPrompt = buildFinalPrompt(sceneTags, charPrompt, '', false);
 
     const sdOverrides = {
         free_extend: false,
@@ -2755,6 +2765,10 @@ function sanitizeExpandedPrompt(raw) {
 }
 
 function buildDirectChinesePrompt(description, charPrompt) {
+    const charInfo = extractCharacterInfo();
+    if (charInfo && charInfo.structured) {
+        return buildStructuredScenePrompt(charInfo, description, null);
+    }
     let prompt = description;
     if (charPrompt) {
         prompt = charPrompt + ', ' + prompt;
@@ -3680,13 +3694,20 @@ function logGeneration(data) {
 }
 
 function buildFinalPrompt(expandedPrompt, charPrompt, charNegative, isDirectMode) {
+    const charInfo = extractCharacterInfo();
+
     if (isDirectMode) {
+        if (charInfo && charInfo.structured) {
+            return buildStructuredScenePrompt(charInfo, expandedPrompt, null);
+        }
         return expandedPrompt;
     }
 
     let finalPrompt = expandedPrompt;
 
-    if (charPrompt) {
+    if (charInfo && charInfo.structured) {
+        finalPrompt = buildStructuredScenePrompt(charInfo, expandedPrompt, null);
+    } else if (charPrompt) {
         const charFirstTag = charPrompt.split(',')[0].trim().toLowerCase();
         const expandedLower = expandedPrompt.toLowerCase();
         if (!expandedLower.includes(charFirstTag)) {
@@ -6588,6 +6609,92 @@ function buildStructuredAvatarPrompt(charInfo) {
     return tags.join(', ');
 }
 
+function buildStructuredScenePrompt(charInfo, sceneTags, styleConfig) {
+    if (!charInfo || !charInfo.structured) {
+        return sceneTags || '';
+    }
+    const s = charInfo.structured;
+    const sceneLower = (sceneTags || '').toLowerCase();
+    const tags = [];
+
+    tags.push(s.gender === 'male' ? '1boy' : '1girl');
+
+    if (s.ageGroup === 'child') tags.push('child');
+    else if (s.ageGroup === 'teen') tags.push('teenager');
+    else if (s.ageGroup === 'mature') tags.push('mature_female');
+
+    if (s.hairColor && !sceneLower.includes(s.hairColor)) tags.push(s.hairColor);
+    if (s.hairStyle && !sceneLower.includes(s.hairStyle)) tags.push(s.hairStyle);
+    if (s.eyeColor && !sceneLower.includes(s.eyeColor)) tags.push(s.eyeColor);
+    if (s.skinTone && !sceneLower.includes(s.skinTone)) tags.push(s.skinTone);
+    if (s.ears && !sceneLower.includes(s.ears)) tags.push(s.ears);
+    if (s.height === 'tall' && !sceneLower.includes('tall')) tags.push('tall');
+    else if (s.height === 'short' && !sceneLower.includes('petite')) tags.push('petite');
+
+    if (s.race && !sceneLower.includes(s.race)) tags.push(s.race);
+
+    const charClothing = s.clothing.slice(0, 2);
+    for (const c of charClothing) {
+        if (!sceneLower.includes(c)) tags.push(c);
+    }
+
+    const charAccessories = s.accessories.slice(0, 3);
+    for (const a of charAccessories) {
+        if (!sceneLower.includes(a)) tags.push(a);
+    }
+
+    if (s.occupation && !sceneLower.includes(s.occupation)) tags.push(s.occupation);
+
+    if (sceneTags) {
+        const sceneParts = sceneTags.split(',').map(t => t.trim()).filter(t => t.length > 0);
+        for (const sp of sceneParts) {
+            if (!tags.some(et => et.toLowerCase() === sp.toLowerCase())) {
+                tags.push(sp);
+            }
+        }
+    }
+
+    if (!tags.some(t => /close-up|upper_body|full_body|from_above|from_below|pov|wide_shot|portrait|cowboy_shot/i.test(t))) {
+        tags.push('upper_body');
+    }
+
+    if (s.setting) {
+        const settingBgMap = {
+            fantasy: 'fantasy_background',
+            'sci-fi': 'sci-fi_background',
+            feudal_japan: 'japanese_background',
+            ancient_china: 'chinese_background',
+            school: 'school_background',
+            modern: 'city_background',
+            victorian: 'victorian_background',
+            'post-apocalyptic': 'wasteland_background',
+        };
+        const bg = settingBgMap[s.setting];
+        if (bg && !sceneLower.includes('background') && !sceneLower.includes(bg)) {
+            tags.push(bg);
+        }
+    }
+
+    if (charInfo.existingPrompt) {
+        const existing = charInfo.existingPrompt.split(',').map(t => t.trim()).filter(t => t.length > 0);
+        for (const t of existing.slice(0, 10)) {
+            const tLower = t.toLowerCase();
+            if (tLower.includes('masterpiece') || tLower.includes('best quality') || tLower.includes('highres')) continue;
+            if (!tags.some(et => et.toLowerCase() === tLower)) {
+                tags.push(t);
+            }
+        }
+    }
+
+    return tags.join(', ');
+}
+
+function getCharacterStructuredTags() {
+    const charInfo = extractCharacterInfo();
+    if (!charInfo || !charInfo.structured) return '';
+    return buildStructuredScenePrompt(charInfo, '', null);
+}
+
 function assessPromptConsistency(prompt, charInfo) {
     if (!charInfo || !charInfo.structured) return { score: 0, missing: [], details: '' };
     const s = charInfo.structured;
@@ -7166,5 +7273,5 @@ jQuery(async () => {
 
     setTimeout(() => scanAllVisibleMessages(), 1500);
 
-    console.log('[Story-Images] 图片功能辅助 v3.0.1 - Fix smart scene button injection into mes_buttons container');
+    console.log('[Story-Images] 图片功能辅助 v3.1.0 - Structured character-aware prompt generation with appearance extraction');
 });

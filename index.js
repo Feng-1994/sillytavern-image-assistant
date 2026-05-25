@@ -4925,41 +4925,97 @@ async function loadSettingsUI() {
             const styleConfig = getStyleConfig();
             const currentSettings = getSettings();
             const changes = [];
+            let sourceChanged = false;
 
-            if (styleConfig.scale !== undefined && sd.scale !== styleConfig.scale) {
-                sd.scale = styleConfig.scale; changes.push(`CFG=${styleConfig.scale}`);
-            }
-            if (styleConfig.steps !== undefined && sd.steps !== styleConfig.steps) {
-                sd.steps = styleConfig.steps; changes.push(`Steps=${styleConfig.steps}`);
-            }
-            if (styleConfig.sampler && sd.sampler !== styleConfig.sampler) {
-                sd.sampler = styleConfig.sampler; changes.push(`Sampler=${styleConfig.sampler}`);
-            }
-            if (styleConfig.size) {
-                const [w, h] = styleConfig.size.split('x').map(Number);
-                if (w && h && (sd.width !== w || sd.height !== h)) {
-                    sd.width = w; sd.height = h; changes.push(`Size=${styleConfig.size}`);
-                }
-            }
-            if (styleConfig.promptPrefix && sd.prompt_prefix !== styleConfig.promptPrefix) {
-                sd.prompt_prefix = styleConfig.promptPrefix; changes.push('前缀');
-            }
-            if (currentSettings.comfyWorkflow && sd.comfy_workflow !== currentSettings.comfyWorkflow) {
-                sd.comfy_workflow = currentSettings.comfyWorkflow; changes.push('工作流');
-            }
             if (currentSettings.cnbEnabled && sd.source !== 'comfy') {
                 sd.source = 'comfy';
-                const sourceSelect = document.getElementById('sd_source');
-                if (sourceSelect) sourceSelect.value = 'comfy';
+                $('#sd_source').val('comfy').trigger('change');
+                sourceChanged = true;
                 changes.push('Source=ComfyUI');
             }
 
-            const comfyUrlInput = document.getElementById('comfy_url');
-            if (comfyUrlInput && sd.comfy_url) { comfyUrlInput.value = sd.comfy_url; }
-            const scaleInput = document.getElementById('sd_scale');
-            if (scaleInput) { scaleInput.value = sd.scale; }
-            const stepsInput = document.getElementById('sd_steps');
-            if (stepsInput) { stepsInput.value = sd.steps; }
+            if (sd.comfy_url && $('#comfy_url').val() !== sd.comfy_url) {
+                $('#comfy_url').val(sd.comfy_url).trigger('input');
+                changes.push('ComfyUI URL');
+            }
+
+            if (styleConfig.scale !== undefined && sd.scale !== styleConfig.scale) {
+                sd.scale = styleConfig.scale;
+                $('#sd_scale').val(styleConfig.scale).trigger('input');
+                changes.push(`CFG=${styleConfig.scale}`);
+            }
+
+            if (styleConfig.steps !== undefined && sd.steps !== styleConfig.steps) {
+                sd.steps = styleConfig.steps;
+                $('#sd_steps').val(styleConfig.steps).trigger('input');
+                changes.push(`Steps=${styleConfig.steps}`);
+            }
+
+            if (styleConfig.sampler && sd.sampler !== styleConfig.sampler) {
+                sd.sampler = styleConfig.sampler;
+                $('#sd_sampler').val(styleConfig.sampler).trigger('change');
+                changes.push(`Sampler=${styleConfig.sampler}`);
+            }
+
+            if (styleConfig.scheduler && sd.scheduler !== styleConfig.scheduler) {
+                sd.scheduler = styleConfig.scheduler;
+                $('#sd_scheduler').val(styleConfig.scheduler).trigger('change');
+                changes.push(`Scheduler=${styleConfig.scheduler}`);
+            }
+
+            if (styleConfig.size) {
+                const [w, h] = styleConfig.size.split('x').map(Number);
+                if (w && h && (sd.width !== w || sd.height !== h)) {
+                    sd.width = w;
+                    sd.height = h;
+                    $('#sd_width').val(w).trigger('input');
+                    $('#sd_height').val(h).trigger('input');
+                    changes.push(`Size=${styleConfig.size}`);
+                }
+            }
+
+            if (styleConfig.promptPrefix && sd.prompt_prefix !== styleConfig.promptPrefix) {
+                sd.prompt_prefix = styleConfig.promptPrefix;
+                $('#sd_prompt_prefix').val(styleConfig.promptPrefix).trigger('input');
+                changes.push('正向前缀');
+            }
+
+            if (styleConfig.negativeExtra) {
+                const newNeg = [sd.negative_prompt, styleConfig.negativeExtra].filter(Boolean).join(', ');
+                if (sd.negative_prompt !== newNeg) {
+                    sd.negative_prompt = newNeg;
+                    $('#sd_negative_prompt').val(newNeg).trigger('input');
+                    changes.push('反向提示词');
+                }
+            }
+
+            if (currentSettings.comfyWorkflow && sd.comfy_workflow !== currentSettings.comfyWorkflow) {
+                sd.comfy_workflow = currentSettings.comfyWorkflow;
+                $('#sd_comfy_workflow').val(currentSettings.comfyWorkflow).trigger('change');
+                changes.push('工作流');
+            }
+
+            if (styleConfig.model && sd.model !== styleConfig.model) {
+                sd.model = styleConfig.model;
+                $('#sd_model').val(styleConfig.model).trigger('change');
+                changes.push(`Model=${styleConfig.model}`);
+            }
+
+            if (styleConfig.vae && sd.vae !== styleConfig.vae) {
+                sd.vae = styleConfig.vae;
+                $('#sd_vae').val(styleConfig.vae).trigger('change');
+                changes.push(`VAE=${styleConfig.vae}`);
+            }
+
+            if (styleConfig.clipSkip !== undefined && sd.clip_skip !== styleConfig.clipSkip) {
+                sd.clip_skip = styleConfig.clipSkip;
+                $('#sd_clip_skip').val(styleConfig.clipSkip).trigger('input');
+                changes.push(`CLIP Skip=${styleConfig.clipSkip}`);
+            }
+
+            if (typeof toggleSourceControls === 'function' && sourceChanged) {
+                toggleSourceControls();
+            }
 
             saveSettingsDebounced();
 
@@ -6622,5 +6678,5 @@ jQuery(async () => {
 
     setTimeout(() => scanAllVisibleMessages(), 1500);
 
-    console.log('[Story-Images] 图片功能辅助 v2.6.0 - Style sync to SD extension + generatePicture retry + ComfyUI startup polling');
+    console.log('[Story-Images] 图片功能辅助 v2.6.1 - Fix style sync: jQuery trigger UI update + full param coverage');
 });

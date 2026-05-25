@@ -4270,43 +4270,42 @@ function injectSmartSceneButton(messageId) {
     const hasImageTag = TAG_REGEXES.some(r => r.regex.test(text));
     if (hasImageTag) return;
 
-    const swipeBtns = mesEl.querySelector('.swipe_right');
-    const insertTarget = swipeBtns ? swipeBtns.parentElement : mesEl.querySelector('.mes_buttons');
-    if (!insertTarget) return;
+    const mesButtons = mesEl.querySelector('.mes_buttons');
+    if (!mesButtons) return;
 
     const btn = document.createElement('div');
-    btn.className = 'si-smart-btn';
+    btn.className = 'mes_button si-smart-btn';
     btn.title = '智能场景生图 - 分析对话上下文自动生成图片';
     btn.dataset.siMesid = messageId;
-    btn.innerHTML = '<span class="si-smart-icon">🧠</span>';
-    btn.style.cssText = 'cursor:pointer;display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:6px;font-size:14px;transition:all 0.2s;opacity:0.6;margin:0 2px;';
-    btn.addEventListener('mouseenter', () => { btn.style.opacity = '1'; btn.style.background = 'rgba(74,158,255,0.2)'; });
-    btn.addEventListener('mouseleave', () => { btn.style.opacity = '0.6'; btn.style.background = 'transparent'; });
+    btn.innerHTML = '🧠';
     btn.addEventListener('click', async (e) => {
         e.preventDefault();
         e.stopPropagation();
         if (btn.classList.contains('si-smart-loading')) return;
         btn.classList.add('si-smart-loading');
-        const iconEl = btn.querySelector('.si-smart-icon');
-        const origIcon = iconEl?.textContent || '🧠';
-        if (iconEl) iconEl.textContent = '⏳';
-        btn.style.opacity = '1';
+        const origText = btn.textContent;
+        btn.textContent = '⏳';
         try {
             const result = await smartSceneGenerate(messageId);
             if (result) {
-                if (iconEl) iconEl.textContent = '✅';
-                setTimeout(() => { if (iconEl) iconEl.textContent = origIcon; btn.classList.remove('si-smart-loading'); }, 3000);
+                btn.textContent = '✅';
+                setTimeout(() => { btn.textContent = origText; btn.classList.remove('si-smart-loading'); }, 3000);
             } else {
-                if (iconEl) iconEl.textContent = '❌';
-                setTimeout(() => { if (iconEl) iconEl.textContent = origIcon; btn.classList.remove('si-smart-loading'); }, 2000);
+                btn.textContent = '❌';
+                setTimeout(() => { btn.textContent = origText; btn.classList.remove('si-smart-loading'); }, 2000);
             }
         } catch (err) {
-            if (iconEl) iconEl.textContent = '❌';
-            setTimeout(() => { if (iconEl) iconEl.textContent = origIcon; btn.classList.remove('si-smart-loading'); }, 2000);
+            btn.textContent = '❌';
+            setTimeout(() => { btn.textContent = origText; btn.classList.remove('si-smart-loading'); }, 2000);
         }
     });
 
-    insertTarget.insertBefore(btn, insertTarget.firstChild);
+    const editBtn = mesButtons.querySelector('.mes_edit');
+    if (editBtn) {
+        mesButtons.insertBefore(btn, editBtn);
+    } else {
+        mesButtons.appendChild(btn);
+    }
 }
 
 function bindAutoRegenButtons() {
@@ -7167,5 +7166,5 @@ jQuery(async () => {
 
     setTimeout(() => scanAllVisibleMessages(), 1500);
 
-    console.log('[Story-Images] 图片功能辅助 v3.0.0 - Smart Scene Image Generation + model fallback + style sync');
+    console.log('[Story-Images] 图片功能辅助 v3.0.1 - Fix smart scene button injection into mes_buttons container');
 });

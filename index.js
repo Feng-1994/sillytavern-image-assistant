@@ -241,6 +241,8 @@ const DEFAULT_SETTINGS = {
     cnbAutoStop: false,
     cnbAutoStopDelay: 30,
     showTopNavIcon: false,
+    smartGenEnabled: true,
+    smartGenContextLines: 5,
 };
 
 const EXPANSION_SYSTEM_PROMPT = `You are an expert Stable Diffusion prompt engineer specializing in anime-style image generation using the Animagine XL 3.1 model. Your task is to convert a Chinese scene description into optimized English Danbooru-style tags.
@@ -2375,6 +2377,353 @@ function findBestFallbackModel(availableModels, styleKey) {
     return availableModels[0] || '';
 }
 
+const SMART_SCENE_SYSTEM_PROMPT = `You are an expert visual scene analyst for AI image generation. Analyze the conversation context and extract visual elements.
+
+Output ONLY a valid JSON object with these exact fields:
+{
+  "should_generate": true,
+  "confidence": 0.8,
+  "scene_description": "Brief scene summary",
+  "visual_elements": {
+    "subject": "Main subject (e.g. 1girl, 1boy, couple)",
+    "action": "What the subject is doing (e.g. sitting_on_chair, looking_out_window)",
+    "expression": "Facial expression or emotion (e.g. gentle_smile, teary_eyes)",
+    "clothing": "Clothing description (e.g. white_dress, school_uniform)",
+    "setting": "Location or environment (e.g. bedroom, forest, cafe)",
+    "lighting": "Lighting mood (e.g. warm_lighting, moonlight, sunset)",
+    "camera": "Camera angle or shot type (e.g. close-up, upper_body, wide_shot)"
+  },
+  "mood": "Overall emotional tone (e.g. peaceful, dramatic, romantic)",
+  "sd_tags": "Comma-separated Danbooru-style tags for Stable Diffusion"
+}
+
+CRITICAL RULES:
+- Output ONLY the JSON object, no other text, no markdown, no explanation
+- sd_tags must use underscores for spaces: "red_silk_dress" not "red silk dress"
+- sd_tags must start with subject count: "1girl" or "1boy" etc.
+- sd_tags must include ALL visual elements: subject + action + expression + clothing + setting + lighting + camera
+- Do NOT include quality tags (masterpiece, best quality etc) - they are added automatically
+- Do NOT repeat character base tags - only add NEW scene-specific tags
+- If the conversation has NO visual/scene content (pure abstract discussion), set should_generate to false
+- Match the visual style to the mood: romantic mood = soft warm lighting, dramatic mood = strong contrast lighting
+- For realistic style: add "photorealistic, raw_photo, 8k" to sd_tags
+- For anime style: use anime-specific tags like "anime_style" if appropriate`;
+
+const SMART_SCENE_USER_TEMPLATE = `Character: {charName}
+Character base tags: {charPrompt}
+Current image style: {styleLabel}
+
+Recent conversation (latest messages at bottom):
+{conversationHistory}
+
+Analyze the most recent scene and generate SD tags. Output ONLY the JSON object.`;
+
+function getRecentChatContext(messageId, count) {
+    const settings = getSettings();
+    const lineCount = count || settings.smartGenContextLines || 5;
+    const startIdx = Math.max(0, messageId - lineCount + 1);
+    const lines = [];
+    for (let i = startIdx; i <= messageId; i++) {
+        const msg = chat[i];
+        if (!msg || !msg.mes) continue;
+        const role = msg.is_user ? 'User' : (msg.name || 'AI');
+        const text = msg.mes.substring(0, 500);
+        lines.push(`[${role}]: ${text}`);
+    }
+    return lines.join('\n');
+}
+
+async function analyzeSceneWithLLM(context, charName, charPrompt, styleKey) {
+    const styleConfig = STYLE_CONFIGS[styleKey] || STYLE_CONFIGS.anime;
+    const userPrompt = SMART_SCENE_USER_TEMPLATE
+        .replace('{charName}', charName || 'unknown')
+        .replace('{charPrompt}', charPrompt || 'no specific character tags')
+        .replace('{styleLabel}', styleConfig.label || 'anime')
+        .replace('{conversationHistory}', context);
+
+    const settings = getSettings();
+    const method = settings.expansionMethod || 'direct';
+
+    let rawResponse = '';
+
+    if (method === 'remote_api') {
+        try {
+            rawResponse = await callRemoteApiForScene(SMART_SCENE_SYSTEM_PROMPT, userPrompt);
+        } catch (e) {
+            console.warn('[Story-Images] Remote API scene analysis failed:', e.message);
+        }
+    }
+
+    if (!rawResponse && method === 'ollama') {
+        try {
+            rawResponse = await callOllamaForScene(SMART_SCENE_SYSTEM_PROMPT, userPrompt);
+        } catch (e) {
+            console.warn('[Story-Images] Ollama scene analysis failed:', e.message);
+        }
+    }
+
+    if (!rawResponse && (method === 'st_llm' || method === 'direct')) {
+        try {
+            const fullPrompt = `${SMART_SCENE_SYSTEM_PROMPT}\n\n${userPrompt}`;
+            rawResponse = await generateQuietPrompt({ quietPrompt: fullPrompt, responseLength: 600 });
+        } catch (e) {
+            console.warn('[Story-Images] ST LLM scene analysis failed:', e.message);
+        }
+    }
+
+    if (!rawResponse) {
+        return null;
+    }
+
+    try {
+        let jsonStr = rawResponse.trim();
+        const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            jsonStr = jsonMatch[0];
+        }
+        const analysis = JSON.parse(jsonStr);
+        if (typeof analysis.should_generate !== 'boolean') {
+            analysis.should_generate = true;
+        }
+        if (typeof analysis.confidence !== 'number') {
+            analysis.confidence = 0.5;
+        }
+        return analysis;
+    } catch (e) {
+        console.warn('[Story-Images] Failed to parse scene analysis JSON:', e.message, '\nRaw:', rawResponse.substring(0, 200));
+        return {
+            should_generate: true,
+            confidence: 0.3,
+            scene_description: rawResponse.substring(0, 100),
+            visual_elements: {},
+            mood: 'neutral',
+            sd_tags: rawResponse.replace(/[\n\r]/g, ', ').substring(0, 300),
+        };
+    }
+}
+
+async function callOllamaForScene(systemPrompt, userPrompt) {
+    const settings = getSettings();
+    const ollamaUrl = settings.ollamaUrl || 'http://localhost:11434';
+    let model = settings.ollamaModel || '';
+    if (!model) {
+        const models = await fetchOllamaModels();
+        const preferred = models.find(m => m.includes('qwen') || m.includes('llama') || m.includes('gemma'));
+        model = preferred || models[0] || '';
+    }
+    if (!model) throw new Error('No Ollama model available');
+
+    const response = await fetch(`${ollamaUrl}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            model,
+            messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: userPrompt },
+            ],
+            stream: false,
+            options: { temperature: 0.4, top_p: 0.85, num_predict: 600, repeat_penalty: 1.15 },
+        }),
+    });
+    if (!response.ok) throw new Error(`Ollama API error: ${response.status}`);
+    const data = await response.json();
+    return data.message?.content || '';
+}
+
+async function callRemoteApiForScene(systemPrompt, userPrompt) {
+    const settings = getSettings();
+    const apiUrl = settings.remoteApiUrl || '';
+    const apiKey = settings.remoteApiKey || '';
+    if (!apiUrl) throw new Error('Remote API URL not configured');
+
+    const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            ...(apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {}),
+        },
+        body: JSON.stringify({
+            model: settings.remoteApiModel || '',
+            messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: userPrompt },
+            ],
+            temperature: 0.4,
+            max_tokens: 600,
+        }),
+    });
+    if (!response.ok) throw new Error(`Remote API error: ${response.status}`);
+    const data = await response.json();
+    return data.choices?.[0]?.message?.content || data.response || '';
+}
+
+function convertSceneToPrompt(analysis, styleConfig) {
+    if (!analysis) return '';
+    if (analysis.sd_tags && analysis.sd_tags.length > 20) {
+        let tags = analysis.sd_tags;
+        tags = tags.replace(/masterpiece[,，]\s*/gi, '');
+        tags = tags.replace(/best\s*quality[,，]\s*/gi, '');
+        return tags;
+    }
+    const ve = analysis.visual_elements || {};
+    const parts = [];
+    if (ve.subject) parts.push(ve.subject);
+    if (ve.action) parts.push(ve.action);
+    if (ve.expression) parts.push(ve.expression);
+    if (ve.clothing) parts.push(ve.clothing);
+    if (ve.setting) parts.push(ve.setting);
+    if (ve.lighting) parts.push(ve.lighting);
+    if (ve.camera) parts.push(ve.camera);
+    if (parts.length === 0 && analysis.scene_description) {
+        return analysis.scene_description;
+    }
+    return parts.join(', ');
+}
+
+async function smartSceneGenerate(messageId) {
+    const settings = getSettings();
+    const sd = extension_settings.sd;
+    if (!sd) {
+        showToast('SD扩展未加载，无法生成图片', 'error');
+        return null;
+    }
+    if (!settings.enabled) {
+        showToast('Image Assistant未启用', 'error');
+        return null;
+    }
+
+    const message = chat[messageId];
+    if (!message) return null;
+    const charName = message.name || getCharacterName();
+    const charPrompt = getCharacterPrompt(charName);
+    const styleKey = settings.style || 'anime';
+
+    showToast('🧠 正在分析对话场景...', 'info');
+
+    const context = getRecentChatContext(messageId);
+    if (!context.trim()) {
+        showToast('对话内容为空，无法分析场景', 'error');
+        return null;
+    }
+
+    let analysis;
+    try {
+        analysis = await analyzeSceneWithLLM(context, charName, charPrompt, styleKey);
+    } catch (e) {
+        showToast(`场景分析失败: ${e.message}`, 'error');
+        return null;
+    }
+
+    if (!analysis) {
+        showToast('场景分析返回为空，请检查LLM配置', 'error');
+        return null;
+    }
+
+    if (!analysis.should_generate) {
+        showToast('当前对话场景不适合生成图片（纯对话/抽象讨论）', 'info');
+        return null;
+    }
+
+    if (analysis.confidence < 0.3) {
+        showToast(`场景置信度较低(${(analysis.confidence * 100).toFixed(0)}%)，跳过生成`, 'info');
+        return null;
+    }
+
+    const styleConfig = getStyleConfig();
+    const sceneTags = convertSceneToPrompt(analysis, styleConfig);
+
+    if (!sceneTags || sceneTags.length < 5) {
+        showToast('提取的场景标签过少，无法生成图片', 'error');
+        return null;
+    }
+
+    console.log(`[Story-Images Smart] Scene: ${analysis.scene_description} | Mood: ${analysis.mood} | Confidence: ${analysis.confidence} | Tags: ${sceneTags.substring(0, 150)}`);
+
+    if (settings.cnbEnabled && sd.source === 'comfy') {
+        const serviceReady = await cnbEnsureServiceReady();
+        if (!serviceReady) {
+            showToast('ComfyUI服务不可用', 'error');
+            return null;
+        }
+    }
+
+    const canGenerate = await validateBeforeGeneration();
+    if (!canGenerate) return null;
+
+    const _generatePicture = await waitForGeneratePicture();
+    if (!_generatePicture) {
+        showToast('图片生成功能不可用', 'error');
+        return null;
+    }
+
+    if (sd.source === 'comfy' && !getModelMatchInfo(styleKey).isOptimal) {
+        await autoSwitchModel(styleKey);
+    }
+
+    const finalPrompt = buildFinalPrompt(sceneTags, charPrompt, '', true);
+
+    const sdOverrides = {
+        free_extend: false,
+        command_visible: false,
+        prompt_prefix: styleConfig.promptPrefix,
+        scale: styleConfig.scale,
+        steps: styleConfig.steps,
+        sampler: styleConfig.sampler,
+    };
+
+    if (styleConfig.negativeExtra) {
+        const base = sd.negative_prompt || '';
+        if (!base.includes(styleConfig.negativeExtra.trim().substring(2))) {
+            sdOverrides.negative_prompt = base + styleConfig.negativeExtra;
+        }
+    }
+
+    if (styleConfig.workflow && sd.source === 'comfy' && !settings.comfyWorkflow) {
+        sdOverrides.comfy_workflow = styleConfig.workflow;
+    } else if (settings.comfyWorkflow && sd.source === 'comfy') {
+        sdOverrides.comfy_workflow = settings.comfyWorkflow;
+    }
+
+    if (sd.source === 'comfy' && sd.model) {
+        try {
+            const comfyUrl = (sd.comfy_url || 'http://127.0.0.1:8188').replace(/\/+$/, '');
+            const resp = await fetch(`${comfyUrl}/object_info/CheckpointLoaderSimple`);
+            if (resp.ok) {
+                const data = await resp.json();
+                const availableModels = data.CheckpointLoaderSimple?.input?.required?.ckpt_name?.[0] || [];
+                if (!availableModels.includes(sd.model)) {
+                    const fallback = findBestFallbackModel(availableModels, styleKey);
+                    if (fallback) sdOverrides.model = fallback;
+                }
+            }
+        } catch (_) {}
+    }
+
+    showToast(`🎨 智能生图: ${analysis.scene_description || sceneTags.substring(0, 40)}...`, 'info');
+
+    return await withSdSettings(sdOverrides, async () => {
+        try {
+            const result = await _generatePicture('command', {}, finalPrompt);
+            if (result) {
+                showToast('✅ 智能场景生图成功!', 'success');
+                logGeneration({
+                    originalDescription: analysis.scene_description || 'smart scene',
+                    expandedPrompt: finalPrompt,
+                    style: styleKey,
+                    method: 'smart_scene',
+                    success: true,
+                });
+            }
+            return result;
+        } catch (err) {
+            console.error('[Story-Images Smart] Generation error:', err);
+            showToast(`智能生图失败: ${err.message}`, 'error');
+            return null;
+        }
+    });
+}
+
 function sanitizeExpandedPrompt(raw) {
     let result = raw;
     result = result.replace(/```[\s\S]*?```/g, '');
@@ -3902,6 +4251,62 @@ async function onCharacterMessageRendered(messageId) {
 
     processChoiceButtons(messageId);
     bindAutoRegenButtons();
+    injectSmartSceneButton(messageId);
+}
+
+function injectSmartSceneButton(messageId) {
+    const settings = getSettings();
+    if (!settings.smartGenEnabled) return;
+
+    const message = chat[messageId];
+    if (!message || message.is_user || message.is_system) return;
+
+    const mesEl = document.querySelector(`.mes[mesid="${messageId}"]`);
+    if (!mesEl) return;
+
+    if (mesEl.querySelector('.si-smart-btn')) return;
+
+    const text = message.mes || '';
+    const hasImageTag = TAG_REGEXES.some(r => r.regex.test(text));
+    if (hasImageTag) return;
+
+    const swipeBtns = mesEl.querySelector('.swipe_right');
+    const insertTarget = swipeBtns ? swipeBtns.parentElement : mesEl.querySelector('.mes_buttons');
+    if (!insertTarget) return;
+
+    const btn = document.createElement('div');
+    btn.className = 'si-smart-btn';
+    btn.title = '智能场景生图 - 分析对话上下文自动生成图片';
+    btn.dataset.siMesid = messageId;
+    btn.innerHTML = '<span class="si-smart-icon">🧠</span>';
+    btn.style.cssText = 'cursor:pointer;display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:6px;font-size:14px;transition:all 0.2s;opacity:0.6;margin:0 2px;';
+    btn.addEventListener('mouseenter', () => { btn.style.opacity = '1'; btn.style.background = 'rgba(74,158,255,0.2)'; });
+    btn.addEventListener('mouseleave', () => { btn.style.opacity = '0.6'; btn.style.background = 'transparent'; });
+    btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (btn.classList.contains('si-smart-loading')) return;
+        btn.classList.add('si-smart-loading');
+        const iconEl = btn.querySelector('.si-smart-icon');
+        const origIcon = iconEl?.textContent || '🧠';
+        if (iconEl) iconEl.textContent = '⏳';
+        btn.style.opacity = '1';
+        try {
+            const result = await smartSceneGenerate(messageId);
+            if (result) {
+                if (iconEl) iconEl.textContent = '✅';
+                setTimeout(() => { if (iconEl) iconEl.textContent = origIcon; btn.classList.remove('si-smart-loading'); }, 3000);
+            } else {
+                if (iconEl) iconEl.textContent = '❌';
+                setTimeout(() => { if (iconEl) iconEl.textContent = origIcon; btn.classList.remove('si-smart-loading'); }, 2000);
+            }
+        } catch (err) {
+            if (iconEl) iconEl.textContent = '❌';
+            setTimeout(() => { if (iconEl) iconEl.textContent = origIcon; btn.classList.remove('si-smart-loading'); }, 2000);
+        }
+    });
+
+    insertTarget.insertBefore(btn, insertTarget.firstChild);
 }
 
 function bindAutoRegenButtons() {
@@ -4610,6 +5015,15 @@ async function loadSettingsUI() {
             <label><input type="checkbox" id="si_remove_tag" ${settings.removeTagAfterProcess ? 'checked' : ''}> 生成后移除原文标签</label>
             <label><input type="checkbox" id="si_show_toasts" ${settings.showToasts ? 'checked' : ''}> 显示状态提示</label>
 
+            <h4>🧠 智能场景生图</h4>
+            <label><input type="checkbox" id="si_smart_gen_enabled" ${settings.smartGenEnabled ? 'checked' : ''}> 启用智能场景生图按钮</label>
+            <div style="margin: 2px 0 4px 20px; padding: 4px 8px; background: rgba(74,158,255,0.1); border-radius: 4px; font-size: 11px; color: #4a9eff;">
+                在没有生图标签的AI回复旁显示🧠按钮，点击后自动分析对话上下文生成图片
+            </div>
+            <div style="margin: 4px 0 4px 20px;">
+                <label style="font-size: 12px; color: #94a3b8;">分析上下文条数: <input type="number" id="si_smart_gen_context_lines" value="${settings.smartGenContextLines || 5}" min="2" max="20" step="1" style="width:50px;text-align:center;background:rgba(0,0,0,0.3);border:1px solid rgba(74,158,255,0.3);border-radius:4px;color:#fff;padding:2px 4px;"> (2-20)</label>
+            </div>
+
             <h4>🎨 生图风格</h4>
             ${styleSelectorHtml}
             <div style="margin: 4px 0; padding: 6px; background: rgba(74,158,255,0.1); border-radius: 4px; font-size: 11px; color: #4a9eff;">
@@ -4914,6 +5328,16 @@ async function loadSettingsUI() {
     });
     document.getElementById('si_show_toasts')?.addEventListener('change', function () {
         settings.showToasts = !!this.checked; saveSettingsDebounced();
+    });
+    document.getElementById('si_smart_gen_enabled')?.addEventListener('change', function () {
+        settings.smartGenEnabled = !!this.checked; saveSettingsDebounced();
+        scanAllVisibleMessages();
+    });
+    document.getElementById('si_smart_gen_context_lines')?.addEventListener('change', function () {
+        const val = parseInt(this.value) || 5;
+        settings.smartGenContextLines = Math.max(2, Math.min(20, val));
+        this.value = settings.smartGenContextLines;
+        saveSettingsDebounced();
     });
 
     document.querySelectorAll('.si-style-card').forEach(card => {
@@ -6743,5 +7167,5 @@ jQuery(async () => {
 
     setTimeout(() => scanAllVisibleMessages(), 1500);
 
-    console.log('[Story-Images] 图片功能辅助 v2.7.0 - Fix model fallback when recommended model unavailable in ComfyUI');
+    console.log('[Story-Images] 图片功能辅助 v3.0.0 - Smart Scene Image Generation + model fallback + style sync');
 });

@@ -2542,13 +2542,16 @@ async function analyzeSceneWithLLM(context, charName, charPrompt, styleKey) {
         return analysis;
     } catch (e) {
         console.warn('[Story-Images] Failed to parse scene analysis JSON:', e.message, '\nRaw:', rawResponse.substring(0, 200));
+        const cleanedTags = sanitizeSdTags(rawResponse);
         return {
             should_generate: true,
             confidence: 0.3,
-            scene_description: rawResponse.substring(0, 100),
-            visual_elements: {},
-            mood: 'neutral',
-            sd_tags: rawResponse.replace(/[\n\r]/g, ', ').substring(0, 300),
+            scene_description: '',
+            characters: [],
+            environment: {},
+            camera: {},
+            atmosphere: '',
+            sd_tags: cleanedTags || '1girl, upper_body',
         };
     }
 }
@@ -2609,25 +2612,55 @@ async function callRemoteApiForScene(systemPrompt, userPrompt) {
     return data.choices?.[0]?.message?.content || data.response || '';
 }
 
+function sanitizeSdTags(raw) {
+    if (!raw) return '';
+    let result = raw;
+    result = result.replace(/[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/g, '');
+    result = result.replace(/["'`]/g, '');
+    result = result.replace(/[(){}[\]]/g, '');
+    result = result.replace(/\bmasterpiece[,，]\s*/gi, '');
+    result = result.replace(/\bbest\s*quality[,，]\s*/gi, '');
+    result = result.replace(/\bhighres[,，]\s*/gi, '');
+    result = result.replace(/\babsurdres[,，]\s*/gi, '');
+    result = result.replace(/\bamazing\s*quality[,，]\s*/gi, '');
+    result = result.replace(/\bnewest[,，]\s*/gi, '');
+    result = result.replace(/\n/g, ', ');
+    result = result.replace(/\s{2,}/g, ' ');
+    result = result.replace(/,\s*,/g, ',');
+    result = result.replace(/^,\s*/, '');
+    result = result.replace(/\s*,\s*$/, '');
+    const tags = result.split(',').map(t => t.trim().replace(/\s+/g, '_')).filter(t => {
+        if (t.length < 2) return false;
+        if (/^[\W_]+$/.test(t)) return false;
+        if (t.length > 60) return false;
+        return true;
+    });
+    const seen = new Set();
+    const deduped = [];
+    for (const tag of tags) {
+        const lower = tag.toLowerCase();
+        if (!seen.has(lower)) {
+            seen.add(lower);
+            deduped.push(tag);
+        }
+    }
+    return deduped.join(', ');
+}
+
 function convertSceneToPrompt(analysis, styleConfig) {
     if (!analysis) return '';
     if (analysis.sd_tags && analysis.sd_tags.length > 20) {
-        let tags = analysis.sd_tags;
-        tags = tags.replace(/masterpiece[,，]\s*/gi, '');
-        tags = tags.replace(/best\s*quality[,，]\s*/gi, '');
-        tags = tags.replace(/highres[,，]\s*/gi, '');
-        tags = tags.replace(/absurdres[,，]\s*/gi, '');
-        return tags;
+        return sanitizeSdTags(analysis.sd_tags);
     }
     const parts = [];
     if (analysis.characters && analysis.characters.length > 0) {
         for (const char of analysis.characters) {
             if (char.gender === 'male') parts.push('1boy');
             else if (char.gender === 'female') parts.push('1girl');
-            if (char.appearance) parts.push(char.appearance);
-            if (char.clothing) parts.push(char.clothing);
-            if (char.action) parts.push(char.action);
-            if (char.expression) parts.push(char.expression);
+            if (char.appearance) parts.push(sanitizeSdTags(char.appearance));
+            if (char.clothing) parts.push(sanitizeSdTags(char.clothing));
+            if (char.action) parts.push(sanitizeSdTags(char.action));
+            if (char.expression) parts.push(sanitizeSdTags(char.expression));
         }
         if (analysis.interaction && analysis.interaction !== 'none') {
             parts.push(analysis.interaction.replace(/\s+/g, '_'));
@@ -2649,9 +2682,9 @@ function convertSceneToPrompt(analysis, styleConfig) {
     if (cam.shot) parts.push(cam.shot);
     if (cam.angle && cam.angle !== 'eye_level') parts.push(cam.angle);
     if (parts.length === 0 && analysis.scene_description) {
-        return analysis.scene_description;
+        return sanitizeSdTags(analysis.scene_description);
     }
-    return parts.join(', ');
+    return sanitizeSdTags(parts.join(', '));
 }
 
 async function smartSceneGenerate(messageId) {
@@ -3761,7 +3794,8 @@ function logGeneration(data) {
     saveSettingsDebounced();
 }
 
-function buildFinalPrompt(expandedPrompt, charPrompt, charNegative, isDirectMode) {
+function buildFinalPrompt(rawExpandedPrompt, charPrompt, charNegative, isDirectMode) {
+    const expandedPrompt = sanitizeSdTags(rawExpandedPrompt) || rawExpandedPrompt;
     const charInfo = extractCharacterInfo();
     const styleConfig = getStyleConfig();
     const styleKey = Object.keys(STYLE_CONFIGS).find(k => STYLE_CONFIGS[k] === styleConfig) || 'anime';
@@ -6755,7 +6789,12 @@ function buildStructuredScenePrompt(charInfo, sceneTags, styleConfig) {
     }
 
     if (sceneTags) {
-        const sceneParts = sceneTags.split(',').map(t => t.trim()).filter(t => t.length > 0);
+        const sceneParts = sceneTags.split(',').map(t => t.trim()).filter(t => {
+            if (t.length === 0) return false;
+            if (/[\u4e00-\u9fff]/.test(t)) return false;
+            if (t.length > 60) return false;
+            return true;
+        });
         for (const sp of sceneParts) {
             if (!tags.some(et => et.toLowerCase() === sp.toLowerCase())) {
                 tags.push(sp);

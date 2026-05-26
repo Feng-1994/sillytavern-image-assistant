@@ -75,6 +75,28 @@ const TAG_REGEXES = [
     { regex: /\[微信图片[：:]\s*([^\]]+)\]/g, type: 'wechat', label: '微信图片' },
 ];
 
+const GEN_IMAGE_TRIGGERS = ['生图', '生成图片', '画图', '画一张', '来张图', '来张图片', '生成图像'];
+
+const GEN_IMAGE_SYSTEM_INSTRUCTION = `[System Instruction: The user requested image generation. You MUST insert an image tag in your response to describe the current scene visually. Use one of these formats:
+- [图片：English SD prompt tags] for a static image
+- [动图：English SD prompt tags] for an animated image
+- [📸图库新增：English SD prompt tags] for a photo-style image
+- [微信图片：English SD prompt tags] for a casual photo-style image
+
+Requirements for the SD prompt tags:
+1. MUST start with character count: 1girl or 1boy or multiple_girls etc.
+2. MUST include character appearance: hair color, hair style, eye color, ears, race
+3. MUST include current clothing from the scene
+4. MUST include current action and expression based on the conversation
+5. MUST include environment: indoor/outdoor, location, lighting, time of day
+6. MUST include composition: close-up, upper_body, full_body, wide_shot etc.
+7. Use English Danbooru-style tags with underscores, separated by commas
+8. Do NOT include Chinese text in the tags
+9. Do NOT include quality tags (masterpiece, best quality etc) - they are added automatically
+10. Example: [图片：1girl, silver_hair, long_hair, blue_eyes, maid_dress, sitting_on_chair, gentle_smile, indoor, living_room, warm_lighting, afternoon, upper_body]
+
+Insert the image tag naturally within your narrative response, at the most visually impactful moment. You can insert multiple image tags if the scene has multiple distinct visual moments.]`;
+
 const MODEL_PROFILES = {
     animagine_xl_v31: {
         id: 'animagine_xl_v31',
@@ -243,6 +265,7 @@ const DEFAULT_SETTINGS = {
     showTopNavIcon: false,
     smartGenEnabled: true,
     smartGenContextLines: 5,
+    genImageTriggerEnabled: true,
 };
 
 const EXPANSION_SYSTEM_PROMPT = `You are an expert Stable Diffusion prompt engineer specializing in anime-style image generation using the Animagine XL 3.1 model. Your task is to convert a Chinese scene description into optimized English Danbooru-style tags.
@@ -2496,34 +2519,73 @@ async function analyzeSceneWithLLM(context, charName, charPrompt, styleKey) {
     const method = settings.expansionMethod || 'direct';
 
     let rawResponse = '';
+    let lastError = '';
+    let triedMethods = [];
 
     if (method === 'remote_api') {
+        triedMethods.push('remote_api');
         try {
             rawResponse = await callRemoteApiForScene(SMART_SCENE_SYSTEM_PROMPT, userPrompt);
         } catch (e) {
+            lastError = `Remote API: ${e.message}`;
             console.warn('[Story-Images] Remote API scene analysis failed:', e.message);
         }
     }
 
     if (!rawResponse && method === 'ollama') {
+        triedMethods.push('ollama');
         try {
             rawResponse = await callOllamaForScene(SMART_SCENE_SYSTEM_PROMPT, userPrompt);
         } catch (e) {
+            lastError = `Ollama: ${e.message}`;
             console.warn('[Story-Images] Ollama scene analysis failed:', e.message);
         }
     }
 
     if (!rawResponse && (method === 'st_llm' || method === 'direct')) {
+        triedMethods.push('st_llm');
         try {
             const fullPrompt = `${SMART_SCENE_SYSTEM_PROMPT}\n\n${userPrompt}`;
             rawResponse = await generateQuietPrompt({ quietPrompt: fullPrompt, responseLength: 600 });
         } catch (e) {
+            lastError = `ST LLM: ${e.message}`;
             console.warn('[Story-Images] ST LLM scene analysis failed:', e.message);
         }
     }
 
+    if (!rawResponse && !triedMethods.includes('remote_api') && settings.remoteApiUrl) {
+        triedMethods.push('remote_api(fallback)');
+        try {
+            rawResponse = await callRemoteApiForScene(SMART_SCENE_SYSTEM_PROMPT, userPrompt);
+        } catch (e) {
+            lastError = `Remote API fallback: ${e.message}`;
+            console.warn('[Story-Images] Remote API fallback failed:', e.message);
+        }
+    }
+
+    if (!rawResponse && !triedMethods.includes('ollama')) {
+        triedMethods.push('ollama(fallback)');
+        try {
+            rawResponse = await callOllamaForScene(SMART_SCENE_SYSTEM_PROMPT, userPrompt);
+        } catch (e) {
+            lastError = `Ollama fallback: ${e.message}`;
+            console.warn('[Story-Images] Ollama fallback failed:', e.message);
+        }
+    }
+
+    if (!rawResponse && !triedMethods.includes('st_llm')) {
+        triedMethods.push('st_llm(fallback)');
+        try {
+            const fullPrompt = `${SMART_SCENE_SYSTEM_PROMPT}\n\n${userPrompt}`;
+            rawResponse = await generateQuietPrompt({ quietPrompt: fullPrompt, responseLength: 600 });
+        } catch (e) {
+            lastError = `ST LLM fallback: ${e.message}`;
+            console.warn('[Story-Images] ST LLM fallback failed:', e.message);
+        }
+    }
+
     if (!rawResponse) {
-        return null;
+        return { _error: true, _message: `所有LLM方法均失败 (尝试: ${triedMethods.join(', ')}). 最后错误: ${lastError}` };
     }
 
     try {
@@ -2687,6 +2749,24 @@ function convertSceneToPrompt(analysis, styleConfig) {
     return sanitizeSdTags(parts.join(', '));
 }
 
+function onChatCompletionPromptReady(eventData) {
+    const settings = getSettings();
+    if (!settings.enabled || !settings.genImageTriggerEnabled) return;
+    if (!Array.isArray(eventData.chat)) return;
+    const lastUserMsg = [...eventData.chat].reverse().find(m => m.role === 'user');
+    if (!lastUserMsg || !lastUserMsg.content) return;
+    const content = typeof lastUserMsg.content === 'string' ? lastUserMsg.content : '';
+    const hasTrigger = GEN_IMAGE_TRIGGERS.some(trigger => content.includes(trigger));
+    if (!hasTrigger) return;
+    const hasExistingTag = TAG_REGEXES.some(r => r.regex.test(content));
+    if (hasExistingTag) return;
+    eventData.chat.push({
+        role: 'system',
+        content: GEN_IMAGE_SYSTEM_INSTRUCTION,
+    });
+    console.log('[Story-Images] "生图" trigger detected, injected image generation instruction');
+}
+
 async function smartSceneGenerate(messageId) {
     const settings = getSettings();
     const sd = extension_settings.sd;
@@ -2723,6 +2803,11 @@ async function smartSceneGenerate(messageId) {
 
     if (!analysis) {
         showToast('场景分析返回为空，请检查LLM配置', 'error');
+        return null;
+    }
+
+    if (analysis._error) {
+        showToast(`场景分析失败: ${analysis._message}`, 'error');
         return null;
     }
 
@@ -5160,6 +5245,11 @@ async function loadSettingsUI() {
                 <label style="font-size: 12px; color: #94a3b8;">分析上下文条数: <input type="number" id="si_smart_gen_context_lines" value="${settings.smartGenContextLines || 5}" min="2" max="20" step="1" style="width:50px;text-align:center;background:rgba(0,0,0,0.3);border:1px solid rgba(74,158,255,0.3);border-radius:4px;color:#fff;padding:2px 4px;"> (2-20)</label>
             </div>
 
+            <label><input type="checkbox" id="si_gen_image_trigger" ${settings.genImageTriggerEnabled ? 'checked' : ''}> 启用"生图"指令</label>
+            <div style="margin: 2px 0 4px 20px; padding: 4px 8px; background: rgba(74,158,255,0.1); border-radius: 4px; font-size: 11px; color: #4a9eff;">
+                在对话中输入"生图"、"画图"等指令时，AI自动在回复中插入图片标签并生成图片
+            </div>
+
             <h4>🎨 生图风格</h4>
             ${styleSelectorHtml}
             <div style="margin: 4px 0; padding: 6px; background: rgba(74,158,255,0.1); border-radius: 4px; font-size: 11px; color: #4a9eff;">
@@ -5473,6 +5563,10 @@ async function loadSettingsUI() {
         const val = parseInt(this.value) || 5;
         settings.smartGenContextLines = Math.max(2, Math.min(20, val));
         this.value = settings.smartGenContextLines;
+        saveSettingsDebounced();
+    });
+    document.getElementById('si_gen_image_trigger')?.addEventListener('change', function () {
+        settings.genImageTriggerEnabled = !!this.checked;
         saveSettingsDebounced();
     });
 
@@ -7372,6 +7466,7 @@ jQuery(async () => {
             bindAutoRegenButtons();
         }, 800);
     });
+    eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, onChatCompletionPromptReady);
 
     const sidebarHtml = `
         <div class="inline-drawer">

@@ -2765,10 +2765,6 @@ function sanitizeExpandedPrompt(raw) {
 }
 
 function buildDirectChinesePrompt(description, charPrompt) {
-    const charInfo = extractCharacterInfo();
-    if (charInfo && charInfo.structured) {
-        return buildStructuredScenePrompt(charInfo, description, null);
-    }
     let prompt = description;
     if (charPrompt) {
         prompt = charPrompt + ', ' + prompt;
@@ -6461,7 +6457,6 @@ function parseCharacterFeatures(text) {
     for (const cm of clothingMap) {
         if (cm.words.some(w => text.includes(w))) features.clothing.push(cm.tag);
     }
-    if (features.clothing.length === 0) features.clothing.push('default_clothes');
 
     const accessoryMap = [
         { words: ['glasses', 'spectacles'], tag: 'glasses' },
@@ -6624,11 +6619,13 @@ function buildStructuredScenePrompt(charInfo, sceneTags, styleConfig) {
     const sceneLower = (sceneTags || '').toLowerCase();
     const tags = [];
 
-    tags.push(s.gender === 'male' ? '1boy' : '1girl');
+    if (s.gender === 'male') tags.push('1boy');
+    else if (s.gender === 'female') tags.push('1girl');
+    else tags.push('1girl');
 
     if (s.ageGroup === 'child') tags.push('child');
     else if (s.ageGroup === 'teen') tags.push('teenager');
-    else if (s.ageGroup === 'mature') tags.push('mature_female');
+    else if (s.ageGroup === 'mature') tags.push(s.gender === 'male' ? 'mature_male' : 'mature_female');
 
     if (s.hairColor && !sceneLower.includes(s.hairColor)) tags.push(s.hairColor);
     if (s.hairStyle && !sceneLower.includes(s.hairStyle)) tags.push(s.hairStyle);

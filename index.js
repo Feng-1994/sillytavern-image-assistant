@@ -86,19 +86,19 @@ const MODEL_PROFILES = {
         defaultSize: '832x1216',
         sizeOptions: ['832x1216', '1024x1024', '1216x832'],
         recommendedWorkflow: 'Anime_TXT2IMG_Workflow.json',
-        baseNegative: 'nsfw, lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry, artist name',
+        baseNegative: 'nsfw, lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry, artist name, bad proportions, extra limbs, deformed, disfigured, mutation, ugly, duplicate, morbid, mutilated, poorly drawn hands, poorly drawn face, out of frame, cut off, extra arms, extra legs, fused fingers, too many fingers',
     },
     juggernaut_xl_v9: {
         id: 'juggernaut_xl_v9',
         name: 'Juggernaut XL v9',
-        pattern: /juggernaut.?xl.?v?9/i,
+        pattern: /juggernaut.?xl.?v?[89]/i,
         type: 'sdxl',
         strengths: ['realistic', 'photorealistic', 'cinematic', 'fantasy_dark', 'portrait'],
         description: 'SDXL写实专用模型，擅长真实照片、电影质感、人物肖像',
         defaultSize: '1024x1024',
         sizeOptions: ['1024x1024', '1216x832', '832x1216'],
         recommendedWorkflow: 'Default_Comfy_Workflow.json',
-        baseNegative: 'nsfw, painting, cartoon, anime, illustration, 3d, lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry',
+        baseNegative: 'nsfw, painting, cartoon, anime, illustration, 3d, lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry, bad proportions, extra limbs, deformed, disfigured, mutation, ugly, duplicate, morbid, mutilated, poorly drawn hands, poorly drawn face, out of frame, cut off, extra arms, extra legs, fused fingers, too many fingers',
     },
     flux_dev: {
         id: 'flux_dev',
@@ -110,7 +110,7 @@ const MODEL_PROFILES = {
         defaultSize: '1024x1024',
         sizeOptions: ['1024x1024', '1216x832', '832x1216'],
         recommendedWorkflow: 'Default_Comfy_Workflow.json',
-        baseNegative: 'nsfw, lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry',
+        baseNegative: '',
     },
     sd15: {
         id: 'sd15',
@@ -122,7 +122,7 @@ const MODEL_PROFILES = {
         defaultSize: '512x768',
         sizeOptions: ['512x768', '512x512', '768x512'],
         recommendedWorkflow: 'Default_Comfy_Workflow.json',
-        baseNegative: 'nsfw, lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry',
+        baseNegative: 'nsfw, lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry, bad proportions, extra limbs, deformed, disfigured, mutation, ugly, duplicate, morbid, mutilated, poorly drawn hands, poorly drawn face, out of frame, cut off, extra arms, extra legs, fused fingers, too many fingers',
     },
 };
 
@@ -130,43 +130,43 @@ const STYLE_CONFIGS = {
     anime: {
         label: '二次元', icon: '🎨', description: '日系动漫风格，色彩鲜明', recommendedModel: 'animagine_xl_v31',
         modelConfigs: {
-            animagine_xl_v31: { promptPrefix: 'masterpiece, best quality, anime_style, year_2024, absurdres, detailed,', negativeExtra: '', scale: 5, steps: 28, sampler: 'euler_ancestral', size: '832x1216', workflow: 'Anime_TXT2IMG_Workflow.json', tip: 'Animagine XL 3.1 最佳风格' },
-            juggernaut_xl_v9: { promptPrefix: 'masterpiece, best quality, anime style, illustration, detailed, vibrant colors,', negativeExtra: ', photorealistic, 3d render, blurry', scale: 6, steps: 25, sampler: 'dpmpp_2m', size: '1024x1024', workflow: 'Default_Comfy_Workflow.json', tip: 'Juggernaut需显式指定anime style' },
+            animagine_xl_v31: { promptPrefix: 'masterpiece, best quality, anime_style, year_2025, absurdres, detailed,', negativeExtra: '', scale: 6, steps: 28, sampler: 'euler_ancestral', scheduler: 'normal', size: '832x1216', workflow: 'Anime_TXT2IMG_Workflow.json', tip: 'Animagine XL 3.1 最佳风格' },
+            juggernaut_xl_v9: { promptPrefix: 'masterpiece, best quality, highres, anime style, illustration, detailed, vibrant colors,', negativeExtra: ', photorealistic, 3d render, blurry', scale: 6, steps: 28, sampler: 'dpmpp_2m', scheduler: 'karras', size: '1024x1024', workflow: 'Default_Comfy_Workflow.json', tip: 'Juggernaut需显式指定anime style' },
         },
     },
     realistic: {
         label: '写实', icon: '📷', description: '真实照片风格，细节逼真', recommendedModel: 'juggernaut_xl_v9',
         modelConfigs: {
-            juggernaut_xl_v9: { promptPrefix: 'masterpiece, best quality, photorealistic, realistic, detailed, 8k, raw photo, film grain,', negativeExtra: ', anime, cartoon, illustration, 3d, painting, sketch, drawing, art, anime_style, render', scale: 7, steps: 30, sampler: 'dpmpp_2m', size: '1024x1024', workflow: 'Default_Comfy_Workflow.json', tip: 'Juggernaut XL v9 最佳风格' },
-            animagine_xl_v31: { promptPrefix: 'masterpiece, best quality, photorealistic, realistic, detailed, 8k, raw photo,', negativeExtra: ', anime, cartoon, illustration, 3d, painting, sketch, drawing, art, anime_style, chibi, deformed', scale: 7, steps: 30, sampler: 'dpmpp_2m', size: '1024x1024', workflow: 'Default_Comfy_Workflow.json', tip: 'Animagine写实能力有限，建议切换Juggernaut' },
+            juggernaut_xl_v9: { promptPrefix: 'masterpiece, best quality, highres, photorealistic, realistic, detailed, 8k, raw photo, film grain,', negativeExtra: ', anime, cartoon, illustration, 3d, painting, sketch, drawing, art, anime_style, render', scale: 7, steps: 30, sampler: 'dpmpp_2m', scheduler: 'karras', size: '1024x1024', workflow: 'Default_Comfy_Workflow.json', tip: 'Juggernaut XL v9 最佳风格' },
+            animagine_xl_v31: { promptPrefix: 'masterpiece, best quality, highres, photorealistic, realistic, detailed, 8k, raw photo,', negativeExtra: ', anime, cartoon, illustration, 3d, painting, sketch, drawing, art, anime_style, chibi, deformed', scale: 7, steps: 30, sampler: 'dpmpp_2m', scheduler: 'karras', size: '1024x1024', workflow: 'Default_Comfy_Workflow.json', tip: 'Animagine写实能力有限，建议切换Juggernaut' },
         },
     },
     chinese_classical: {
         label: '古风', icon: '🏮', description: '国风水墨风格，意境悠远', recommendedModel: 'animagine_xl_v31',
         modelConfigs: {
-            animagine_xl_v31: { promptPrefix: 'masterpiece, best quality, chinese clothes, hanfu, traditional chinese art, elegant, detailed, year_2024,', negativeExtra: ', modern, western, sci-fi, cyberpunk, 3d render, deformed', scale: 5, steps: 28, sampler: 'euler_ancestral', size: '832x1216', workflow: 'Anime_TXT2IMG_Workflow.json', tip: 'Animagine擅长古风角色，使用hanfu标签' },
-            juggernaut_xl_v9: { promptPrefix: 'masterpiece, best quality, chinese painting style, traditional chinese art, ink wash, elegant, detailed, realistic,', negativeExtra: ', modern, western, sci-fi, cyberpunk, anime_style, 3d render, cartoon', scale: 6, steps: 28, sampler: 'euler_ancestral', size: '1024x1024', workflow: 'Default_Comfy_Workflow.json', tip: 'Juggernaut偏写实古风，适合水墨画风格' },
+            animagine_xl_v31: { promptPrefix: 'masterpiece, best quality, absurdres, chinese clothes, hanfu, traditional chinese art, elegant, detailed, year_2025,', negativeExtra: ', modern, western, sci-fi, cyberpunk, 3d render, deformed', scale: 6, steps: 28, sampler: 'euler_ancestral', scheduler: 'normal', size: '832x1216', workflow: 'Anime_TXT2IMG_Workflow.json', tip: 'Animagine擅长古风角色，使用hanfu标签' },
+            juggernaut_xl_v9: { promptPrefix: 'masterpiece, best quality, highres, chinese painting style, traditional chinese art, ink wash, elegant, detailed, realistic,', negativeExtra: ', modern, western, sci-fi, cyberpunk, anime_style, 3d render, cartoon', scale: 6, steps: 28, sampler: 'dpmpp_2m', scheduler: 'karras', size: '1024x1024', workflow: 'Default_Comfy_Workflow.json', tip: 'Juggernaut偏写实古风，适合水墨画风格' },
         },
     },
     cinematic: {
         label: '电影感', icon: '🎬', description: '电影画面质感，光影氛围强烈', recommendedModel: 'juggernaut_xl_v9',
         modelConfigs: {
-            juggernaut_xl_v9: { promptPrefix: 'masterpiece, best quality, cinematic, cinematic lighting, dramatic, film grain, depth of field, bokeh, 8k,', negativeExtra: ', anime, cartoon, illustration, 3d, painting, sketch, drawing, anime_style, flat color', scale: 7, steps: 30, sampler: 'dpmpp_2m', size: '1216x832', workflow: 'Default_Comfy_Workflow.json', tip: 'Juggernaut最佳电影风格，横版构图' },
-            animagine_xl_v31: { promptPrefix: 'masterpiece, best quality, cinematic, dramatic lighting, depth of field, movie scene, year_2024,', negativeExtra: ', chibi, deformed, flat color, simple background', scale: 6, steps: 28, sampler: 'euler_ancestral', size: '1216x832', workflow: 'Anime_TXT2IMG_Workflow.json', tip: 'Animagine可生成动漫电影感' },
+            juggernaut_xl_v9: { promptPrefix: 'masterpiece, best quality, highres, cinematic, cinematic lighting, dramatic, film grain, depth of field, bokeh, 8k,', negativeExtra: ', anime, cartoon, illustration, 3d, painting, sketch, drawing, anime_style, flat color', scale: 7, steps: 30, sampler: 'dpmpp_2m', scheduler: 'karras', size: '1216x832', workflow: 'Default_Comfy_Workflow.json', tip: 'Juggernaut最佳电影风格，横版构图' },
+            animagine_xl_v31: { promptPrefix: 'masterpiece, best quality, cinematic, dramatic lighting, depth of field, movie scene, year_2025,', negativeExtra: ', chibi, deformed, flat color, simple background', scale: 7, steps: 28, sampler: 'euler_ancestral', scheduler: 'normal', size: '1216x832', workflow: 'Anime_TXT2IMG_Workflow.json', tip: 'Animagine可生成动漫电影感' },
         },
     },
     fantasy: {
         label: '奇幻', icon: '🧙', description: '奇幻魔法风格，梦幻绚丽', recommendedModel: 'animagine_xl_v31',
         modelConfigs: {
-            animagine_xl_v31: { promptPrefix: 'masterpiece, best quality, fantasy, magical, glowing, ethereal, anime_style, year_2024, detailed,', negativeExtra: ', modern, realistic, photorealistic, boring, plain', scale: 5, steps: 28, sampler: 'euler_ancestral', size: '832x1216', workflow: 'Anime_TXT2IMG_Workflow.json', tip: 'Animagine擅长奇幻动漫风' },
-            juggernaut_xl_v9: { promptPrefix: 'masterpiece, best quality, fantasy art, magical, glowing, epic, detailed, dramatic lighting,', negativeExtra: ', anime, cartoon, chibi, simple, plain, boring', scale: 7, steps: 30, sampler: 'dpmpp_2m', size: '1024x1024', workflow: 'Default_Comfy_Workflow.json', tip: 'Juggernaut适合写实奇幻和史诗场景' },
+            animagine_xl_v31: { promptPrefix: 'masterpiece, best quality, fantasy, magical, glowing, ethereal, anime_style, year_2025, detailed,', negativeExtra: ', modern, realistic, photorealistic, boring, plain', scale: 6, steps: 28, sampler: 'euler_ancestral', scheduler: 'normal', size: '832x1216', workflow: 'Anime_TXT2IMG_Workflow.json', tip: 'Animagine擅长奇幻动漫风' },
+            juggernaut_xl_v9: { promptPrefix: 'masterpiece, best quality, highres, fantasy art, magical, glowing, epic, detailed, dramatic lighting,', negativeExtra: ', anime, cartoon, chibi, simple, plain, boring', scale: 7, steps: 30, sampler: 'dpmpp_2m', scheduler: 'karras', size: '1024x1024', workflow: 'Default_Comfy_Workflow.json', tip: 'Juggernaut适合写实奇幻和史诗场景' },
         },
     },
     portrait: {
         label: '人物肖像', icon: '👤', description: '人物面部特写，精致细腻', recommendedModel: 'juggernaut_xl_v9',
         modelConfigs: {
-            juggernaut_xl_v9: { promptPrefix: 'masterpiece, best quality, portrait, detailed face, detailed eyes, skin texture, 8k, raw photo,', negativeExtra: ', anime, cartoon, illustration, 3d, painting, deformed, bad anatomy, anime_style', scale: 7, steps: 30, sampler: 'dpmpp_2m', size: '832x1216', workflow: 'Story_Portrait_Comfy_Workflow.json', tip: 'Juggernaut最佳肖像风格' },
-            animagine_xl_v31: { promptPrefix: 'masterpiece, best quality, portrait, detailed face, beautiful eyes, anime_style, year_2024,', negativeExtra: ', deformed, bad anatomy, chibi, simple, plain', scale: 5, steps: 28, sampler: 'euler_ancestral', size: '832x1216', workflow: 'Story_Portrait_Comfy_Workflow.json', tip: 'Animagine擅长动漫角色肖像' },
+            juggernaut_xl_v9: { promptPrefix: 'masterpiece, best quality, highres, portrait, detailed face, detailed eyes, skin texture, 8k, raw photo,', negativeExtra: ', anime, cartoon, illustration, 3d, painting, deformed, bad anatomy, anime_style', scale: 7, steps: 30, sampler: 'dpmpp_2m', scheduler: 'karras', size: '832x1216', workflow: 'Story_Portrait_Comfy_Workflow.json', tip: 'Juggernaut最佳肖像风格' },
+            animagine_xl_v31: { promptPrefix: 'masterpiece, best quality, portrait, detailed face, beautiful eyes, anime_style, year_2025,', negativeExtra: ', deformed, bad anatomy, chibi, simple, plain', scale: 6, steps: 28, sampler: 'dpmpp_2m', scheduler: 'karras', size: '832x1216', workflow: 'Story_Portrait_Comfy_Workflow.json', tip: 'Animagine擅长动漫角色肖像' },
         },
     },
 };
@@ -2377,51 +2377,92 @@ function findBestFallbackModel(availableModels, styleKey) {
     return availableModels[0] || '';
 }
 
-const SMART_SCENE_SYSTEM_PROMPT = `You are an expert visual scene analyst for AI image generation. Analyze the conversation context and extract visual elements.
+const SMART_SCENE_SYSTEM_PROMPT = `You are an expert visual scene analyst for AI image generation. Analyze the conversation context and extract detailed visual elements.
 
 Output ONLY a valid JSON object with these exact fields:
 {
   "should_generate": true,
   "confidence": 0.8,
   "scene_description": "Brief scene summary",
-  "visual_elements": {
-    "subject": "Main subject (e.g. 1girl, 1boy, couple)",
-    "action": "What the subject is doing (e.g. sitting_on_chair, looking_out_window)",
-    "expression": "Facial expression or emotion (e.g. gentle_smile, teary_eyes)",
-    "clothing": "Clothing description (e.g. white_dress, school_uniform)",
-    "setting": "Location or environment (e.g. bedroom, forest, cafe)",
-    "lighting": "Lighting mood (e.g. warm_lighting, moonlight, sunset)",
-    "camera": "Camera angle or shot type (e.g. close-up, upper_body, wide_shot)"
+  "characters": [
+    {
+      "identity": "main/supporter/background",
+      "gender": "female/male",
+      "appearance": "hair color, hair style, eye color, ears, race etc",
+      "clothing": "detailed clothing description",
+      "action": "what they are physically DOING",
+      "expression": "facial expression and emotion",
+      "position": "center/left/right/facing viewer/turning away"
+    }
+  ],
+  "character_count": 1,
+  "interaction": "none/hugging/fighting/holding hands/talking etc",
+  "environment": {
+    "location": "specific place (e.g. bedroom, forest, cafe, castle)",
+    "time": "time of day (e.g. morning, sunset, night)",
+    "weather": "weather if relevant (e.g. rain, snow, clear sky)",
+    "lighting": "lighting mood (e.g. warm lighting, moonlight, golden hour)"
   },
-  "mood": "Overall emotional tone (e.g. peaceful, dramatic, romantic)",
-  "sd_tags": "Comma-separated Danbooru-style tags for Stable Diffusion"
+  "atmosphere": "overall mood (e.g. peaceful, dramatic, romantic, tense)",
+  "camera": {
+    "shot": "close-up/upper_body/full_body/wide_shot/cowboy_shot",
+    "angle": "eye_level/from_above/from_below/pov"
+  },
+  "sd_tags": "Comma-separated Danbooru-style tags for Stable Diffusion",
+  "sd_negative": "Optional extra negative tags for this specific scene"
 }
 
 CRITICAL RULES:
 - Output ONLY the JSON object, no other text, no markdown, no explanation
-- sd_tags MUST include the character's core appearance features from the character card (hair color, hair style, eye color, ears, race, etc.)
-- sd_tags must use underscores for spaces: "red_silk_dress" not "red silk dress"
-- sd_tags must start with subject count: "1girl" or "1boy" etc.
-- sd_tags must include ALL visual elements: subject + appearance + action + expression + clothing + setting + lighting + camera
-- Do NOT include quality tags (masterpiece, best quality etc) - they are added automatically
-- The character's BASE appearance tags (hair, eyes, ears, race) MUST appear in sd_tags - these are non-negotiable
-- For clothing: if the character card specifies clothing, use it; if the scene implies different clothing, describe the scene-specific clothing
-- For expression: derive from the CURRENT conversation mood, not the character's default personality
-- For action: derive from what the character is DOING in the latest message
-- If the conversation has NO visual/scene content (pure abstract discussion), set should_generate to false
-- Match the visual style to the mood: romantic mood = soft warm lighting, dramatic mood = strong contrast lighting
-- For realistic style: add "photorealistic, raw_photo, 8k" to sd_tags
-- For anime style: use anime-specific tags like "anime_style" if appropriate`;
+- CHARACTER ANALYSIS:
+  * MUST identify ALL characters present in the latest message
+  * For each character: extract appearance (hair, eyes, ears, race), clothing, action, expression, position
+  * Use character card base appearance as DEFAULT, override ONLY when the scene explicitly describes changes
+- BACKGROUND & ENVIRONMENT:
+  * MUST describe the physical setting (indoor/outdoor, specific location)
+  * MUST include time of day and lighting if implied by the scene
+  * MUST include weather or atmosphere if relevant
+- CHARACTER POSITION & INTERACTION:
+  * For multi-character scenes: describe relative positions (facing each other, side by side, back to back)
+  * Describe physical interactions (hugging, holding hands, fighting, talking)
+- ACTION & EXPRESSION:
+  * Action: what the character is physically DOING in this exact moment (e.g. sitting_on_chair, reaching_out_hand, looking_out_window)
+  * Expression: derive from emotional state in the LATEST message (e.g. gentle_smile, teary_eyes, determined_look)
+  * Body language: posture and gestures implied by the action
+- SD_TAGS FORMATTING:
+  * MUST start with character count tag (1girl, 2girls, 1boy+1girl, etc.)
+  * Character base appearance tags from character card are NON-NEGOTIABLE - they MUST appear in sd_tags
+  * Add scene-specific tags AFTER character tags: clothing overrides, action, expression
+  * Add environment tags: location, time, lighting, weather
+  * Add camera/composition tags LAST
+  * Use underscore format: silver_hair, NOT "silver hair"
+  * Separate with commas, no extra spaces after commas
+  * Do NOT include quality tags (masterpiece, best quality etc) - they are added automatically
+- STYLE ADAPTATION:
+  * For realistic style: add "photorealistic, raw_photo, 8k" to sd_tags
+  * For anime style: add "anime_style" to sd_tags if appropriate
+  * For cinematic style: add "cinematic_lighting, depth_of_field" to sd_tags
+- If the conversation has NO visual/scene content (pure abstract discussion), set should_generate to false`;
 
 const SMART_SCENE_USER_TEMPLATE = `Character: {charName}
-Character base appearance tags (MUST include in sd_tags): {charStructuredTags}
+Character base appearance tags (MANDATORY in sd_tags): {charStructuredTags}
 Character description: {charDescription}
 Current image style: {styleLabel}
 
 Recent conversation (latest messages at bottom):
 {conversationHistory}
 
-Analyze the most recent scene. Your sd_tags MUST include the character's base appearance tags plus scene-specific tags. Output ONLY the JSON object.`;
+INSTRUCTIONS:
+1. Identify ALL characters in the latest message - how many people are present?
+2. For each character: determine appearance, clothing, action, expression, position
+3. Describe the environment: location, time of day, lighting, atmosphere
+4. If multiple characters: describe their interaction and relative positions
+5. Generate sd_tags that include:
+   - Character count + base appearance (from character card - NON-NEGOTIABLE)
+   - Scene-specific clothing/action/expression overrides
+   - Environment and background tags
+   - Camera/composition tags appropriate for the scene
+Output ONLY the JSON object.`;
 
 function getRecentChatContext(messageId, count) {
     const settings = getSettings();
@@ -2574,17 +2615,39 @@ function convertSceneToPrompt(analysis, styleConfig) {
         let tags = analysis.sd_tags;
         tags = tags.replace(/masterpiece[,，]\s*/gi, '');
         tags = tags.replace(/best\s*quality[,，]\s*/gi, '');
+        tags = tags.replace(/highres[,，]\s*/gi, '');
+        tags = tags.replace(/absurdres[,，]\s*/gi, '');
         return tags;
     }
-    const ve = analysis.visual_elements || {};
     const parts = [];
-    if (ve.subject) parts.push(ve.subject);
-    if (ve.action) parts.push(ve.action);
-    if (ve.expression) parts.push(ve.expression);
-    if (ve.clothing) parts.push(ve.clothing);
-    if (ve.setting) parts.push(ve.setting);
-    if (ve.lighting) parts.push(ve.lighting);
-    if (ve.camera) parts.push(ve.camera);
+    if (analysis.characters && analysis.characters.length > 0) {
+        for (const char of analysis.characters) {
+            if (char.gender === 'male') parts.push('1boy');
+            else if (char.gender === 'female') parts.push('1girl');
+            if (char.appearance) parts.push(char.appearance);
+            if (char.clothing) parts.push(char.clothing);
+            if (char.action) parts.push(char.action);
+            if (char.expression) parts.push(char.expression);
+        }
+        if (analysis.interaction && analysis.interaction !== 'none') {
+            parts.push(analysis.interaction.replace(/\s+/g, '_'));
+        }
+    } else {
+        const ve = analysis.visual_elements || {};
+        if (ve.subject) parts.push(ve.subject);
+        if (ve.action) parts.push(ve.action);
+        if (ve.expression) parts.push(ve.expression);
+        if (ve.clothing) parts.push(ve.clothing);
+    }
+    const env = analysis.environment || {};
+    if (env.location) parts.push(env.location.replace(/\s+/g, '_'));
+    if (env.time) parts.push(env.time.replace(/\s+/g, '_') + '_light');
+    if (env.weather) parts.push(env.weather.replace(/\s+/g, '_'));
+    if (env.lighting) parts.push(env.lighting.replace(/\s+/g, '_'));
+    if (analysis.atmosphere) parts.push(analysis.atmosphere.replace(/\s+/g, '_') + '_atmosphere');
+    const cam = analysis.camera || {};
+    if (cam.shot) parts.push(cam.shot);
+    if (cam.angle && cam.angle !== 'eye_level') parts.push(cam.angle);
     if (parts.length === 0 && analysis.scene_description) {
         return analysis.scene_description;
     }
@@ -2684,8 +2747,11 @@ async function smartSceneGenerate(messageId) {
 
     if (styleConfig.negativeExtra) {
         const base = sd.negative_prompt || '';
-        if (!base.includes(styleConfig.negativeExtra.trim().substring(2))) {
-            sdOverrides.negative_prompt = base + styleConfig.negativeExtra;
+        const extraTags = styleConfig.negativeExtra.split(',').map(t => t.trim().toLowerCase()).filter(t => t);
+        const baseTags = base.toLowerCase().split(',').map(t => t.trim());
+        const missing = extraTags.filter(et => !baseTags.some(bt => bt === et));
+        if (missing.length > 0) {
+            sdOverrides.negative_prompt = base + ', ' + missing.join(', ');
         }
     }
 
@@ -2747,6 +2813,12 @@ function sanitizeExpandedPrompt(raw) {
     result = result.replace(/\b(?:here|are|the|following|tags|prompt|description|scene)\s*[:：]/gi, '');
     result = result.replace(/[\u4e00-\u9fff]/g, '');
     result = result.replace(/[(){}[\]]/g, '');
+    result = result.replace(/\bmasterpiece[,，]\s*/gi, '');
+    result = result.replace(/\bbest\s*quality[,，]\s*/gi, '');
+    result = result.replace(/\bhighres[,，]\s*/gi, '');
+    result = result.replace(/\babsurdres[,，]\s*/gi, '');
+    result = result.replace(/\bamazing\s*quality[,，]\s*/gi, '');
+    result = result.replace(/\bnewest[,，]\s*/gi, '');
     result = result.replace(/\s+/g, ' ');
     result = result.replace(/,\s*,/g, ',');
     result = result.replace(/^,\s*/, '');
@@ -3691,17 +3763,20 @@ function logGeneration(data) {
 
 function buildFinalPrompt(expandedPrompt, charPrompt, charNegative, isDirectMode) {
     const charInfo = extractCharacterInfo();
+    const styleConfig = getStyleConfig();
+    const styleKey = Object.keys(STYLE_CONFIGS).find(k => STYLE_CONFIGS[k] === styleConfig) || 'anime';
+    const enrichedStyleConfig = { ...styleConfig, styleKey };
 
     if (isDirectMode) {
         if (charInfo && charInfo.structured) {
-            return buildStructuredScenePrompt(charInfo, expandedPrompt, null);
+            return buildStructuredScenePrompt(charInfo, expandedPrompt, enrichedStyleConfig);
         }
         let directPrompt = expandedPrompt;
         if (!/1girl|1boy|1other|multiple|solo|couple/i.test(directPrompt)) {
             directPrompt = '1girl, ' + directPrompt;
         }
         if (!/close-up|upper_body|full_body|from_above|from_below|pov|wide_shot|portrait|cowboy_shot/i.test(directPrompt)) {
-            directPrompt += ', upper_body';
+            directPrompt += ', ' + (STYLE_DEFAULT_SHOT[styleKey] || 'upper_body');
         }
         return directPrompt;
     }
@@ -3709,12 +3784,13 @@ function buildFinalPrompt(expandedPrompt, charPrompt, charNegative, isDirectMode
     let finalPrompt = expandedPrompt;
 
     if (charInfo && charInfo.structured) {
-        finalPrompt = buildStructuredScenePrompt(charInfo, expandedPrompt, null);
+        finalPrompt = buildStructuredScenePrompt(charInfo, expandedPrompt, enrichedStyleConfig);
     } else if (charPrompt) {
-        const charFirstTag = charPrompt.split(',')[0].trim().toLowerCase();
+        const charTags = charPrompt.split(',').map(t => t.trim()).filter(t => t.length > 0);
         const expandedLower = expandedPrompt.toLowerCase();
-        if (!expandedLower.includes(charFirstTag)) {
-            finalPrompt = charPrompt + ', ' + finalPrompt;
+        const missingTags = charTags.filter(ct => !expandedLower.includes(ct.toLowerCase()));
+        if (missingTags.length > 0) {
+            finalPrompt = missingTags.join(', ') + ', ' + finalPrompt;
         }
     }
 
@@ -3723,7 +3799,7 @@ function buildFinalPrompt(expandedPrompt, charPrompt, charNegative, isDirectMode
     }
 
     if (!/close-up|upper_body|full_body|from_above|from_below|pov|wide_shot|portrait|cowboy_shot/i.test(finalPrompt)) {
-        finalPrompt += ', upper_body';
+        finalPrompt += ', ' + (STYLE_DEFAULT_SHOT[styleKey] || 'upper_body');
     }
 
     return finalPrompt;
@@ -3901,8 +3977,11 @@ async function generateImageForTag(description, charName, tagType) {
 
     if (styleConfig.negativeExtra) {
         const base = sd.negative_prompt || '';
-        if (!base.includes(styleConfig.negativeExtra.trim().substring(2))) {
-            sdOverrides.negative_prompt = base + styleConfig.negativeExtra;
+        const extraTags = styleConfig.negativeExtra.split(',').map(t => t.trim().toLowerCase()).filter(t => t);
+        const baseTags = base.toLowerCase().split(',').map(t => t.trim());
+        const missing = extraTags.filter(et => !baseTags.some(bt => bt === et));
+        if (missing.length > 0) {
+            sdOverrides.negative_prompt = base + ', ' + missing.join(', ');
         }
     }
 
@@ -6611,6 +6690,28 @@ function buildStructuredAvatarPrompt(charInfo) {
     return tags.join(', ');
 }
 
+function estimateTokenCount(tags) {
+    return tags.reduce((sum, t) => sum + Math.ceil(t.split(/_\s/).length * 0.75) + 1, 0);
+}
+
+const STYLE_DEFAULT_SHOT = {
+    anime: 'upper_body',
+    realistic: 'upper_body',
+    chinese_classical: 'upper_body',
+    cinematic: 'wide_shot',
+    fantasy: 'upper_body',
+    portrait: 'close-up',
+};
+
+const STYLE_EXTRA_TAGS = {
+    anime: ['anime_style'],
+    realistic: ['photorealistic'],
+    chinese_classical: ['traditional_art'],
+    cinematic: ['cinematic_lighting'],
+    fantasy: ['fantasy'],
+    portrait: ['detailed_face'],
+};
+
 function buildStructuredScenePrompt(charInfo, sceneTags, styleConfig) {
     if (!charInfo || !charInfo.structured) {
         return sceneTags || '';
@@ -6623,21 +6724,21 @@ function buildStructuredScenePrompt(charInfo, sceneTags, styleConfig) {
     else if (s.gender === 'female') tags.push('1girl');
     else tags.push('1girl');
 
+    if (s.hairColor && !sceneLower.includes(s.hairColor)) tags.push(s.hairColor);
+    if (s.hairStyle && !sceneLower.includes(s.hairStyle)) tags.push(s.hairStyle);
+    if (s.eyeColor && !sceneLower.includes(s.eyeColor)) tags.push(s.eyeColor);
+    if (s.ears && !sceneLower.includes(s.ears)) tags.push(s.ears);
+    if (s.race && !sceneLower.includes(s.race)) tags.push(s.race);
+
     if (s.ageGroup === 'child') tags.push('child');
     else if (s.ageGroup === 'teen') tags.push('teenager');
     else if (s.ageGroup === 'mature') tags.push(s.gender === 'male' ? 'mature_male' : 'mature_female');
 
-    if (s.hairColor && !sceneLower.includes(s.hairColor)) tags.push(s.hairColor);
-    if (s.hairStyle && !sceneLower.includes(s.hairStyle)) tags.push(s.hairStyle);
-    if (s.eyeColor && !sceneLower.includes(s.eyeColor)) tags.push(s.eyeColor);
     if (s.skinTone && !sceneLower.includes(s.skinTone)) tags.push(s.skinTone);
-    if (s.ears && !sceneLower.includes(s.ears)) tags.push(s.ears);
     if (s.height === 'tall' && !sceneLower.includes('tall')) tags.push('tall');
     else if (s.height === 'short' && !sceneLower.includes('petite')) tags.push('petite');
 
-    if (s.race && !sceneLower.includes(s.race)) tags.push(s.race);
-
-    const charClothing = s.clothing.slice(0, 2);
+    const charClothing = s.clothing.slice(0, 3);
     for (const c of charClothing) {
         if (!sceneLower.includes(c)) tags.push(c);
     }
@@ -6663,7 +6764,8 @@ function buildStructuredScenePrompt(charInfo, sceneTags, styleConfig) {
     }
 
     if (!tags.some(t => /close-up|upper_body|full_body|from_above|from_below|pov|wide_shot|portrait|cowboy_shot/i.test(t))) {
-        tags.push('upper_body');
+        const styleKey = styleConfig?.styleKey || 'anime';
+        tags.push(STYLE_DEFAULT_SHOT[styleKey] || 'upper_body');
     }
 
     if (s.setting) {
@@ -6683,14 +6785,30 @@ function buildStructuredScenePrompt(charInfo, sceneTags, styleConfig) {
         }
     }
 
+    if (styleConfig) {
+        const styleKey = styleConfig.styleKey || 'anime';
+        const extraTags = STYLE_EXTRA_TAGS[styleKey] || [];
+        for (const et of extraTags) {
+            if (!tags.some(t => t.toLowerCase() === et.toLowerCase()) && !sceneLower.includes(et)) {
+                tags.push(et);
+            }
+        }
+    }
+
     if (charInfo.existingPrompt) {
         const existing = charInfo.existingPrompt.split(',').map(t => t.trim()).filter(t => t.length > 0);
-        for (const t of existing.slice(0, 10)) {
+        for (const t of existing.slice(0, 15)) {
             const tLower = t.toLowerCase();
-            if (tLower.includes('masterpiece') || tLower.includes('best quality') || tLower.includes('highres')) continue;
+            if (tLower.includes('masterpiece') || tLower.includes('best quality') || tLower.includes('highres') || tLower.includes('absurdres') || tLower.includes('amazing quality') || tLower.includes('newest')) continue;
             if (!tags.some(et => et.toLowerCase() === tLower)) {
                 tags.push(t);
             }
+        }
+    }
+
+    if (estimateTokenCount(tags) > 75) {
+        while (tags.length > 10 && estimateTokenCount(tags) > 75) {
+            tags.pop();
         }
     }
 
@@ -6910,12 +7028,15 @@ async function generateAvatarImage() {
         scale: styleConfig.scale,
         steps: styleConfig.steps,
         sampler: styleConfig.sampler,
-        width: 512,
-        height: 768,
+        width: modelProfile?.type === 'sd15' ? 512 : 832,
+        height: modelProfile?.type === 'sd15' ? 768 : 1216,
     };
     if (styleConfig.negativeExtra) {
         const base = sd.negative_prompt || '';
-        if (!base.includes(styleConfig.negativeExtra.trim().substring(2))) sdOverrides.negative_prompt = base + styleConfig.negativeExtra;
+        const extraTags = styleConfig.negativeExtra.split(',').map(t => t.trim().toLowerCase()).filter(t => t);
+        const baseTags = base.toLowerCase().split(',').map(t => t.trim());
+        const missing = extraTags.filter(et => !baseTags.some(bt => bt === et));
+        if (missing.length > 0) sdOverrides.negative_prompt = base + ', ' + missing.join(', ');
     }
     if (styleConfig.workflow && sd.source === 'comfy' && !settings.comfyWorkflow) sdOverrides.comfy_workflow = styleConfig.workflow;
     else if (settings.comfyWorkflow && sd.source === 'comfy') sdOverrides.comfy_workflow = settings.comfyWorkflow;
